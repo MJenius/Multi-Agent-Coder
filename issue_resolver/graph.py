@@ -69,5 +69,5 @@ def build_graph() -> StateGraph:
 
     # ── Compile ─────────────────────────────────────────────────────
     compiled = graph.compile()
-    print("✅ Graph compiled successfully!")
+    print("[OK] Graph compiled successfully!")
     return compiled

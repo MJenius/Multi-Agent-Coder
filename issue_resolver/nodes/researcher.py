@@ -12,7 +12,7 @@ from issue_resolver.state import AgentState
 
 def researcher_node(state: AgentState) -> dict:
     """Stub: simulate discovering relevant code snippets."""
-    print("[Researcher] 🔍  Agent Researcher is thinking...")
+    print("[Researcher] Agent Researcher is thinking...")
 
     # Dummy update — pretend we found some relevant code
     dummy_snippet = (
@@ -24,5 +24,5 @@ def researcher_node(state: AgentState) -> dict:
     existing_context = list(state.get("file_context", []))
     existing_context.append(dummy_snippet)
 
-    print(f"[Researcher] 📄  Found {len(existing_context)} snippet(s) so far.")
+    print(f"[Researcher] Found {len(existing_context)} snippet(s) so far.")
     return {"file_context": existing_context}

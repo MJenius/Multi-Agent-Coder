@@ -12,7 +12,7 @@ from issue_resolver.state import AgentState
 
 def coder_node(state: AgentState) -> dict:
     """Stub: simulate generating a code fix."""
-    print("[Coder] 🛠️  Agent Coder is thinking...")
+    print("[Coder] Agent Coder is thinking...")
 
     # Dummy diff output
     dummy_fix = (
@@ -26,5 +26,5 @@ def coder_node(state: AgentState) -> dict:
         "+    return sum(item.price for item in items)\n"
     )
 
-    print("[Coder] ✅  Proposed fix generated.")
+    print("[Coder] [OK] Proposed fix generated.")
     return {"proposed_fix": dummy_fix}

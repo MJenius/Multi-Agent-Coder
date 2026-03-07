@@ -47,21 +47,21 @@ def main() -> None:
         "iterations": 0,
     }
 
-    print(f"\n📋 Issue:\n{SAMPLE_ISSUE}")
+    print(f"\n[ISSUE]\n{SAMPLE_ISSUE}")
     print("-" * 60)
 
     # Stream the graph execution step by step
-    print("\n🚀 Starting graph execution...\n")
+    print("\n[START] Starting graph execution...\n")
 
     final_state = None
     for step in app.stream(initial_state):
         # Each step is a dict of {node_name: state_update}
         for node_name, state_update in step.items():
-            print(f"  ── Node '{node_name}' returned: {list(state_update.keys())}")
+            print(f"  -- Node '{node_name}' returned: {list(state_update.keys())}")
         final_state = step
 
     print("\n" + "=" * 60)
-    print("  ✅  Graph completed!")
+    print("  [OK] Graph completed!")
     print("=" * 60)
 
     # Print the final state summary
@@ -69,7 +69,7 @@ def main() -> None:
         # Get the last node's output
         last_node = list(final_state.keys())[-1]
         last_output = final_state[last_node]
-        print(f"\n📊 Final state snapshot (from '{last_node}'):")
+        print(f"\n[RESULT] Final state snapshot (from '{last_node}'):")
         for key, value in last_output.items():
             if isinstance(value, list):
                 print(f"  {key}: [{len(value)} item(s)]")

@@ -54,7 +54,7 @@ def supervisor_node(state: AgentState) -> dict:
 
     # Safety valve: prevent infinite loops
     if iterations >= 5:
-        print("[Supervisor] ⚠️  Max iterations reached — forcing end.")
+        print("[Supervisor] [WARN] Max iterations reached -- forcing end.")
         return {"next_step": "end", "iterations": iterations + 1}
 
     # ------------------------------------------------------------------
@@ -81,15 +81,15 @@ def supervisor_node(state: AgentState) -> dict:
         decision = response.content.strip().lower().split()[0]
     except Exception as exc:
         # If Ollama is unreachable, fall back to deterministic logic
-        print(f"[Supervisor] ⚠️  LLM call failed ({exc}); using rule-based fallback.")
+        print(f"[Supervisor] [WARN] LLM call failed ({exc}); using rule-based fallback.")
         decision = _deterministic_decision(file_context, proposed_fix, errors)
 
     # Validate the decision
     if decision not in ("researcher", "coder", "end"):
-        print(f"[Supervisor] ⚠️  Unexpected LLM output '{decision}'; using fallback.")
+        print(f"[Supervisor] [WARN] Unexpected LLM output '{decision}'; using fallback.")
         decision = _deterministic_decision(file_context, proposed_fix, errors)
 
-    print(f"[Supervisor] 🧭  Decision → {decision}  (iteration {iterations + 1})")
+    print(f"[Supervisor] [ROUTE] Decision -> {decision}  (iteration {iterations + 1})")
     return {"next_step": decision, "iterations": iterations + 1}
 
 
