@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from issue_resolver.graph import build_graph
 from issue_resolver.state import AgentState
+from issue_resolver.utils.logger import get_token_estimate
+import json
 
 
 SAMPLE_ISSUE = """\
@@ -50,6 +52,7 @@ def main() -> None:
         "errors": "",
         "next_step": "",
         "iterations": 0,
+        "history": [],
     }
 
     print(f"\n[REPO] Target repository: {repo_path}")
@@ -71,24 +74,79 @@ def main() -> None:
     print("  [OK] Graph completed!")
     print("=" * 60)
 
-    # Print the final state summary
+    # Print the final state summary and generate resolution_report.json
     if final_state:
         # Get the last node's output
         last_node = list(final_state.keys())[-1]
         last_output = final_state[last_node]
         print(f"\n[RESULT] Final state snapshot (from '{last_node}'):")
+        
+        # State summary printing
         for key, value in last_output.items():
+            if key == "history":
+                continue # Skip console dumping full history
             if isinstance(value, list):
                 print(f"  {key}: [{len(value)} item(s)]")
-                # Show file_context snippets
-                if key == "file_context":
-                    for i, snippet in enumerate(value, 1):
-                        preview = snippet[:200] + "..." if len(snippet) > 200 else snippet
-                        print(f"    [{i}] {preview}")
             elif isinstance(value, str) and len(value) > 80:
                 print(f"  {key}: {value[:80]}...")
             else:
                 print(f"  {key}: {value}")
+        
+        # Generate resolution_report.json
+        print("\n[REPORT] Generating resolution_report.json...")
+        
+        history = last_output.get("history", [])
+        total_iterations = last_output.get("iterations", 0)
+        final_errors = last_output.get("errors", "")
+        final_proposed_fix = last_output.get("proposed_fix", "")
+        
+        # Extract metadata from history
+        files_read = []
+        failed_diffs = []
+        total_chars = 0
+        
+        for entry in history:
+            node = entry.get("node")
+            action = entry.get("action")
+            content = entry.get("content", "")
+            
+            total_chars += len(content)
+            
+            if node == "Researcher" and action == "Tool Call":
+                if '"read_file"' in content:
+                    files_read.append(content)
+                    
+            if node == "Reviewer" and action == "Apply Patch Failed" or action == "Test Execution":
+                if "Error" in content or "Traceback" in content or "FAIL" in content or "failed" in content.lower():
+                    failed_diffs.append({
+                        "node": node,
+                        "action": action,
+                        "traceback_snippet": content[:500]
+                    })
+        
+        # Determine Success Path boolean
+        is_resolved = False
+        if final_proposed_fix and not final_errors:
+            is_resolved = True
+        elif len(history) > 0 and history[-1].get("action") == "Failure Summary":
+            is_resolved = False
+
+        report = {
+            "is_resolved": is_resolved,
+            "total_iterations": total_iterations,
+            "total_character_estimate": total_chars,
+            "total_token_estimate": get_token_estimate(str(total_chars)), 
+            "files_read_summary": files_read,
+            "failed_diffs_and_tracebacks": failed_diffs,
+            "final_successful_diff": final_proposed_fix if is_resolved else None,
+            "final_errors": final_errors if not is_resolved else None,
+            "full_history_trace": history
+        }
+        
+        with open("resolution_report.json", "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=4)
+            
+        print("[OK] Exported resolution_report.json")
 
 
 if __name__ == "__main__":

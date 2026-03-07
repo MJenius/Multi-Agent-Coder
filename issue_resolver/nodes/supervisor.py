@@ -18,6 +18,7 @@ from langchain_ollama import ChatOllama
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from issue_resolver.state import AgentState
+from issue_resolver.utils.logger import append_to_history
 
 
 # ---------------------------------------------------------------------------
@@ -54,8 +55,23 @@ def supervisor_node(state: AgentState) -> dict:
 
     # Safety valve: prevent infinite loops
     if iterations >= 5:
-        print("[Supervisor] [WARN] Max iterations reached -- forcing end.")
-        return {"next_step": "end", "iterations": iterations + 1}
+        print("[Supervisor] [WARN] Max iterations reached -- triggering Graceful Exit.")
+        
+        # Ask LLM for a failure summary
+        summary_prompt = f"The system failed to resolve the issue after 5 iterations. Briefly summarize what was attempted and what went wrong based on the errors: {errors}"
+        try:
+            summary_response = _llm.invoke([HumanMessage(content=summary_prompt)])
+            failure_summary = summary_response.content.strip()
+        except:
+            failure_summary = f"System failed after 5 iterations. Persistent errors: {errors}"
+            
+        history_addition = append_to_history("Supervisor", "Failure Summary", failure_summary)
+        
+        return {
+            "next_step": "end", 
+            "iterations": iterations + 1,
+            "history": history_addition
+        }
 
     # ------------------------------------------------------------------
     # LLM-assisted reasoning (adds flexibility for later phases)
@@ -88,9 +104,15 @@ def supervisor_node(state: AgentState) -> dict:
     if decision not in ("researcher", "coder", "end"):
         print(f"[Supervisor] [WARN] Unexpected LLM output '{decision}'; using fallback.")
         decision = _deterministic_decision(file_context, proposed_fix, errors)
+        
+    history_addition = append_to_history("Supervisor", "Routing Decision", decision)
 
     print(f"[Supervisor] [ROUTE] Decision -> {decision}  (iteration {iterations + 1})")
-    return {"next_step": decision, "iterations": iterations + 1}
+    return {
+        "next_step": decision, 
+        "iterations": iterations + 1,
+        "history": history_addition
+    }
 
 
 # ---------------------------------------------------------------------------

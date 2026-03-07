@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from issue_resolver.state import AgentState
 from issue_resolver.tools.sandbox_tools import apply_diff_in_sandbox, run_main_in_sandbox
+from issue_resolver.utils.logger import append_to_history
+
 
 def reviewer_node(state: AgentState) -> dict:
     """
@@ -21,7 +23,7 @@ def reviewer_node(state: AgentState) -> dict:
     if not proposed_fix:
         # Shouldn't happen unless routing is broken, but handle it gracefully
         print("[Reviewer] [WARN] No proposed fix found in state.")
-        return {"errors": "No fix proposed."}
+        return {"errors": "No fix proposed.", "history": append_to_history("Reviewer", "Failure", "No fix proposed to review.")}
 
     # 1. Apply the diff
     print("[Reviewer] Applying proposed fix in the sandbox...")
@@ -29,18 +31,20 @@ def reviewer_node(state: AgentState) -> dict:
     
     if "Error" in patch_output:
         print("[Reviewer] [FAIL] Patch failed to apply.")
-        return {"errors": f"Failed to apply patch:\n{patch_output}"}
+        return {"errors": f"Failed to apply patch:\n{patch_output}", "history": append_to_history("Reviewer", "Apply Patch Failed", patch_output)}
 
     # 2. Run the main application
     print("[Reviewer] Running validation in sandbox...")
     success, output = run_main_in_sandbox()
 
     # 3. Handle the result
+    history_additions = append_to_history("Reviewer", "Test Execution", output)
+    
     if success:
         print("[Reviewer] [OK] Code ran successfully.")
-        return {"errors": ""}
+        return {"errors": "", "history": history_additions}
     else:
         print("[Reviewer] [FAIL] Code execution failed.")
         # output is already decoded and stripped of special characters
         # via the run_main_in_sandbox tool
-        return {"errors": output}
+        return {"errors": output, "history": history_additions}

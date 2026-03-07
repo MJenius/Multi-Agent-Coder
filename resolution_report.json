@@ -1,0 +1,18 @@
+{
+    "is_resolved": false,
+    "total_iterations": 6,
+    "total_character_estimate": 525,
+    "total_token_estimate": 0,
+    "files_read_summary": [],
+    "failed_diffs_and_tracebacks": [],
+    "final_successful_diff": null,
+    "final_errors": "",
+    "full_history_trace": [
+        {
+            "timestamp": "2026-03-07T23:10:01",
+            "node": "Supervisor",
+            "action": "Failure Summary",
+            "content": "Here's a summary of what was attempted and what went wrong:\n\n**Attempted:** Applying a patch to a file.\n\n**What went wrong:**\n\n1. The patch was applied, but it created a new file with the same name as an existing file.\n2. The system asked if it should overwrite the existing file (with the `-R` option) or skip the patch (with the `[n]` option).\n3. The user chose to skip the patch, ignoring one of the hunks (changes) in the patch.\n\nIn summary, the patch was not successfully applied due to a confli\n... [Truncated 97 chars]"
+        }
+    ]
+}

@@ -1,8 +1,8 @@
---- a/calculate_total.py
-+++ b/calculate_total.py
-@@ -5,7 +5,7 @@ def calculate_total(numbers):
+--- a/path/to/file.py
++++ b/path/to/file.py
+@@ -10,7 +10,7 @@ def calculate_total(items):
      """
-     Calculate the total sum of a list of numbers.
+     Calculate the total price of a list of items.
      """
--    return sum(numbers)
-+    return sum(numbers) if numbers else 0
+-    return sum(item.price for item in items)
++    return sum(item.price for item in items) if items else 0

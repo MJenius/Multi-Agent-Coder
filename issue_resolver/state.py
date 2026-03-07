@@ -12,7 +12,8 @@ Each field is designed to be populated incrementally as the graph executes:
 
 from __future__ import annotations
 
-from typing import TypedDict
+import operator
+from typing import TypedDict, Annotated
 
 
 class AgentState(TypedDict):
@@ -25,3 +26,4 @@ class AgentState(TypedDict):
     errors: str
     next_step: str
     iterations: int
+    history: Annotated[list[dict], operator.add]

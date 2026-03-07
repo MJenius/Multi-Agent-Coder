@@ -14,6 +14,7 @@ from langchain_ollama import ChatOllama
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from issue_resolver.state import AgentState
+from issue_resolver.utils.logger import append_to_history
 
 
 # ---------------------------------------------------------------------------
@@ -51,7 +52,8 @@ RULES -- follow these exactly:
 - The `@@` hunk headers MUST have accurate line numbers.  The code snippets
   you receive already include line numbers -- use them to compute the correct
   `@@ -start,count +start,count @@` values.
-- Do NOT write any explanation, commentary, or conversational text.
+- BEFORE writing the diff block, briefly explain your reasoning (e.g. "I will change X to Y because..."). This explanation will be logged for observability.
+- After reasoning, output ONLY a standard Unified Diff inside a fenced `diff` code block. 
 - If multiple files need changes, include all of them in a single diff block
   with separate --- / +++ headers per file.
 """
@@ -124,9 +126,14 @@ def coder_node(state: AgentState) -> dict:
         response = _llm.invoke(messages)
         raw_output = response.content
         print(f"[Coder] LLM returned {len(raw_output)} chars.")
+        
+        # Log the full raw output (including reasoning)
+        # We allow up to 600 chars of reasoning to be stored in history
+        history_addition = append_to_history("Coder", "Reasoning & Generation", raw_output, max_length=600)
+        
     except Exception as exc:
         print(f"[Coder] [ERROR] LLM call failed: {exc}")
-        return {"proposed_fix": ""}
+        return {"proposed_fix": "", "history": append_to_history("Coder", "Error", str(exc))}
 
     # -- Extract the diff from the fenced code block ----------------------
     diff = _extract_diff(raw_output)
@@ -141,4 +148,7 @@ def coder_node(state: AgentState) -> dict:
         print("[Coder] [WARN] No diff content could be extracted.")
 
     print(f"[Coder] Proposed fix length: {len(diff)} chars.")
-    return {"proposed_fix": diff}
+    return {
+        "proposed_fix": diff,
+        "history": history_addition
+    }

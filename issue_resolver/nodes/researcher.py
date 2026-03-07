@@ -16,6 +16,7 @@ from langchain_ollama import ChatOllama
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
 
 from issue_resolver.state import AgentState
+from issue_resolver.utils.logger import append_to_history
 from issue_resolver.tools import REPO_TOOLS, list_files, search_code, read_file
 
 
@@ -92,6 +93,12 @@ def researcher_node(state: AgentState) -> dict:
     files_read = 0
     total_lines = 0
 
+    # Initialize history for this round
+    history_additions: list[dict] = []
+    
+    # Store initial issue into history
+    history_additions.extend(append_to_history("Researcher", "Started Exploration", f"Repo: {repo_path}\nIssue: {issue_text}"))
+
     for round_num in range(1, _MAX_TOOL_ROUNDS + 1):
         print(f"[Researcher]  |-- Round {round_num}/{_MAX_TOOL_ROUNDS}")
 
@@ -117,6 +124,11 @@ def researcher_node(state: AgentState) -> dict:
             call_id = tc["id"]
 
             print(f"[Researcher]    --> {fn_name}({fn_args})")
+            
+            # Formulate the payload - only store filename and brief summary in state
+            # but sys_logger inside log handles the printing. 
+            log_payload = f"Tool: {fn_name}\nArgs: {json.dumps(fn_args)}"
+            history_additions.extend(append_to_history("Researcher", "Tool Call", log_payload, max_length=150))
 
             # Enforce memory guards for read_file
             if fn_name == "read_file":
@@ -159,4 +171,9 @@ def researcher_node(state: AgentState) -> dict:
     print(f"[Researcher] Done -- collected {len(snippets)} snippet(s), "
           f"{files_read} file(s) read, ~{total_lines} lines.")
 
-    return {"file_context": snippets}
+    history_additions.extend(append_to_history("Researcher", "Finished Exploration", f"Collected {len(snippets)} snippets. Read {files_read} files."))
+
+    return {
+        "file_context": snippets,
+        "history": history_additions
+    }
