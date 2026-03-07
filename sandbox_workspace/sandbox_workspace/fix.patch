@@ -1,0 +1,8 @@
+--- a/calculate_total.py
++++ b/calculate_total.py
+@@ -5,7 +5,7 @@ def calculate_total(numbers):
+     """
+     Calculate the total sum of a list of numbers.
+     """
+-    return sum(numbers)
++    return sum(numbers) if numbers else 0

@@ -17,7 +17,11 @@ services:
   # Sandbox: Where the "Reviewer" agent runs LLM-generated code
   # We use a python-slim image to keep it lightweight for your 16GB RAM
   sandbox:
-    image: python:3.11-slim
+    build:
+      context: .
+      dockerfile: Dockerfile.sandbox
+    labels:
+      - "com.issue_resolver.role=sandbox"
     volumes:
       - ./sandbox_workspace:/workspace
     working_dir: /workspace

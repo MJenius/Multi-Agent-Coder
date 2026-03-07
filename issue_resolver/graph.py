@@ -25,8 +25,12 @@ from __future__ import annotations
 from langgraph.graph import StateGraph, END
 
 from issue_resolver.state import AgentState
-from issue_resolver.nodes import supervisor_node, researcher_node, coder_node
-
+from issue_resolver.nodes import (
+    supervisor_node,
+    researcher_node,
+    coder_node,
+    reviewer_node,
+)
 
 def _route_supervisor(state: AgentState) -> str:
     """Read the Supervisor's routing decision from state."""
@@ -48,6 +52,7 @@ def build_graph() -> StateGraph:
     graph.add_node("supervisor", supervisor_node)
     graph.add_node("researcher", researcher_node)
     graph.add_node("coder", coder_node)
+    graph.add_node("reviewer", reviewer_node)
 
     # ── Entry point ─────────────────────────────────────────────────
     graph.set_entry_point("supervisor")
@@ -65,7 +70,10 @@ def build_graph() -> StateGraph:
 
     # ── After each specialist, loop back to Supervisor ──────────────
     graph.add_edge("researcher", "supervisor")
-    graph.add_edge("coder", "supervisor")
+    # Coder proposes a fix, Reviewer tests it
+    graph.add_edge("coder", "reviewer")
+    # Reviewer returns errors (or lack thereof), loop back to Supervisor
+    graph.add_edge("reviewer", "supervisor")
 
     # ── Compile ─────────────────────────────────────────────────────
     compiled = graph.compile()
