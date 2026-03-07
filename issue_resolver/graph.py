@@ -1,5 +1,5 @@
 """
-Graph Builder — Compiles the LangGraph StateGraph for the issue resolver.
+Graph Builder -- Compiles the LangGraph StateGraph for the issue resolver.
 
 Topology
 --------

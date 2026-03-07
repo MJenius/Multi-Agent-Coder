@@ -1,11 +1,11 @@
 """
-Repository Tools — Local codebase search utilities for the Researcher agent.
+Repository Tools -- Local codebase search utilities for the Researcher agent.
 
 Each function is decorated with @tool so it can be bound to ChatOllama
 via .bind_tools().  All tools include RAM-safety guards:
-  • list_files:   caps output at 200 files
-  • search_code:  caps output at 30 matches
-  • read_file:    truncates at 500 lines
+  - list_files:   caps output at 200 files
+  - search_code:  caps output at 30 matches
+  - read_file:    truncates at 500 lines
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from langchain_core.tools import tool
 
 
 # ---------------------------------------------------------------------------
-# Tool 1 — list_files
+# Tool 1 -- list_files
 # ---------------------------------------------------------------------------
 @tool
 def list_files(directory: str) -> str:
@@ -45,7 +45,7 @@ def list_files(directory: str) -> str:
                 rel = Path(dirpath, fname).relative_to(root)
                 py_files.append(str(rel))
                 if len(py_files) >= 200:
-                    py_files.append("[TRUNCATED — 200 file limit reached]")
+                    py_files.append("[TRUNCATED -- 200 file limit reached]")
                     return "\n".join(py_files)
 
     if not py_files:
@@ -54,7 +54,7 @@ def list_files(directory: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tool 2 — search_code
+# Tool 2 -- search_code
 # ---------------------------------------------------------------------------
 @tool
 def search_code(query: str, directory: str) -> str:
@@ -90,7 +90,7 @@ def search_code(query: str, directory: str) -> str:
                     rel = fpath.relative_to(root)
                     matches.append(f"{rel}:{idx}: {line.rstrip()}")
                     if len(matches) >= 30:
-                        matches.append("[TRUNCATED — 30 match limit reached]")
+                        matches.append("[TRUNCATED -- 30 match limit reached]")
                         return "\n".join(matches)
 
     if not matches:
@@ -99,7 +99,7 @@ def search_code(query: str, directory: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tool 3 — read_file
+# Tool 3 -- read_file
 # ---------------------------------------------------------------------------
 @tool
 def read_file(file_path: str) -> str:

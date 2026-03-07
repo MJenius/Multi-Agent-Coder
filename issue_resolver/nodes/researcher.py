@@ -1,10 +1,10 @@
 """
-Researcher Node — Phase 2: LLM-driven codebase exploration.
+Researcher Node -- Phase 2: LLM-driven codebase exploration.
 
 Uses llama3.2 via ChatOllama with tool-binding to:
   1. List .py files in the target repository.
   2. Search for relevant function / class names mentioned in the issue.
-  3. Read the most relevant files (max 3 files, ≤500 lines each).
+  3. Read the most relevant files (max 3 files, <=500 lines each).
   4. Populate file_context with discovered code snippets.
 """
 
@@ -20,7 +20,7 @@ from issue_resolver.tools import REPO_TOOLS, list_files, search_code, read_file
 
 
 # ---------------------------------------------------------------------------
-# LLM setup — tool-augmented model
+# LLM setup -- tool-augmented model
 # ---------------------------------------------------------------------------
 _base_llm = ChatOllama(
     model="llama3.2:latest",
@@ -30,7 +30,7 @@ _base_llm = ChatOllama(
 
 _llm = _base_llm.bind_tools(REPO_TOOLS)
 
-# Map tool names → callables for dispatching
+# Map tool names --> callables for dispatching
 _TOOL_MAP = {
     "list_files": list_files,
     "search_code": search_code,
@@ -43,9 +43,9 @@ You are the Researcher agent in a multi-agent system that resolves GitHub issues
 Your job is to explore a LOCAL code repository and find the source code
 relevant to the issue.  You have three tools:
 
-  list_files(directory)        – recursively list all .py files
-  search_code(query, directory) – grep for a string across .py files
-  read_file(file_path)          – read a file (truncated at 500 lines)
+  list_files(directory)        - recursively list all .py files
+  search_code(query, directory) - grep for a string across .py files
+  read_file(file_path)          - read a file (truncated at 500 lines)
 
 Strategy:
 1. FIRST call list_files to see the project layout.
@@ -53,17 +53,17 @@ Strategy:
 3. Finally call read_file on the most relevant files (max 3 files).
 
 IMPORTANT CONSTRAINTS:
-• Do NOT read more than 3 files total.
-• Prefer short, targeted reads over reading everything.
-• When you have gathered enough context, stop calling tools and summarise
+- Do NOT read more than 3 files total.
+- Prefer short, targeted reads over reading everything.
+- When you have gathered enough context, stop calling tools and summarise
   what you found in a short final message.
 """
 
 
 # ---------------------------------------------------------------------------
-# Constants — memory guards
+# Constants -- memory guards
 # ---------------------------------------------------------------------------
-_MAX_TOOL_ROUNDS = 5   # max LLM ↔ tool iterations
+_MAX_TOOL_ROUNDS = 5   # max LLM <-> tool iterations
 _MAX_FILES_READ = 3    # cap on read_file calls
 _MAX_TOTAL_LINES = 500  # soft cap across all files read
 
@@ -73,7 +73,7 @@ _MAX_TOTAL_LINES = 500  # soft cap across all files read
 # ---------------------------------------------------------------------------
 def researcher_node(state: AgentState) -> dict:
     """Run the Researcher agent: analyse the issue, call tools, return context."""
-    print("[Researcher] Starting codebase exploration…")
+    print("[Researcher] Starting codebase exploration...")
 
     repo_path = state.get("repo_path", ".")
     issue_text = state.get("issue", "(no issue provided)")
@@ -93,7 +93,7 @@ def researcher_node(state: AgentState) -> dict:
     total_lines = 0
 
     for round_num in range(1, _MAX_TOOL_ROUNDS + 1):
-        print(f"[Researcher]  ↳ Round {round_num}/{_MAX_TOOL_ROUNDS}")
+        print(f"[Researcher]  |-- Round {round_num}/{_MAX_TOOL_ROUNDS}")
 
         # ── Ask the LLM ────────────────────────────────────────────
         try:
@@ -107,7 +107,7 @@ def researcher_node(state: AgentState) -> dict:
         # ── If there are no tool calls, the agent is done ──────────
         tool_calls = getattr(response, "tool_calls", None) or []
         if not tool_calls:
-            print("[Researcher] No more tool calls — wrapping up.")
+            print("[Researcher] No more tool calls -- wrapping up.")
             break
 
         # ── Execute each tool call ─────────────────────────────────
@@ -116,20 +116,20 @@ def researcher_node(state: AgentState) -> dict:
             fn_args = tc["args"]
             call_id = tc["id"]
 
-            print(f"[Researcher]    → {fn_name}({fn_args})")
+            print(f"[Researcher]    --> {fn_name}({fn_args})")
 
             # Enforce memory guards for read_file
             if fn_name == "read_file":
                 if files_read >= _MAX_FILES_READ:
                     result = (
-                        f"[BLOCKED] Already read {_MAX_FILES_READ} files — "
+                        f"[BLOCKED] Already read {_MAX_FILES_READ} files -- "
                         "limit reached. Please summarise with what you have."
                     )
                     messages.append(ToolMessage(content=result, tool_call_id=call_id))
                     continue
                 if total_lines >= _MAX_TOTAL_LINES:
                     result = (
-                        f"[BLOCKED] Already read {total_lines} lines — "
+                        f"[BLOCKED] Already read {total_lines} lines -- "
                         "line budget exhausted."
                     )
                     messages.append(ToolMessage(content=result, tool_call_id=call_id))
@@ -156,7 +156,7 @@ def researcher_node(state: AgentState) -> dict:
 
             messages.append(ToolMessage(content=str(result), tool_call_id=call_id))
 
-    print(f"[Researcher] Done — collected {len(snippets)} snippet(s), "
+    print(f"[Researcher] Done -- collected {len(snippets)} snippet(s), "
           f"{files_read} file(s) read, ~{total_lines} lines.")
 
     return {"file_context": snippets}

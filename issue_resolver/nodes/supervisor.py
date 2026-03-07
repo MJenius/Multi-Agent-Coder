@@ -1,10 +1,10 @@
 """
-Supervisor Node — The "brain" of the agent graph.
+Supervisor Node -- The "brain" of the agent graph.
 
 Uses llama3.2:3b via ChatOllama to decide the next step:
-  1. If file_context is empty        → route to "researcher"
-  2. If file_context exists but no fix → route to "coder"
-  3. If a fix exists with no errors    → route to "end"
+  1. If file_context is empty        -> route to "researcher"
+  2. If file_context exists but no fix -> route to "coder"
+  3. If a fix exists with no errors    -> route to "end"
 
 The LLM acts as a reasoning layer on top of the deterministic rules,
 providing a natural-language justification for each decision.  In Phase 1
@@ -21,7 +21,7 @@ from issue_resolver.state import AgentState
 
 
 # ---------------------------------------------------------------------------
-# LLM setup — swap model / base_url as needed
+# LLM setup -- swap model / base_url as needed
 # ---------------------------------------------------------------------------
 _llm = ChatOllama(
     model="llama3.2:latest",
@@ -31,13 +31,13 @@ _llm = ChatOllama(
 
 _SYSTEM_PROMPT = """\
 You are the Supervisor of a multi-agent system that resolves GitHub issues.
-You must decide the NEXT action.  Reply with EXACTLY one word — one of:
+You must decide the NEXT action.  Reply with EXACTLY one word -- one of:
   researcher  |  coder  |  end
 
 Rules:
-• If no relevant code snippets have been gathered yet → researcher
-• If code snippets exist but no fix has been proposed  → coder
-• If a fix exists and there are no outstanding errors   → end
+- If no relevant code snippets have been gathered yet -> researcher
+- If code snippets exist but no fix has been proposed  -> coder
+- If a fix exists and there are no outstanding errors   -> end
 """
 
 
@@ -107,5 +107,5 @@ def _deterministic_decision(
         return "coder"
     if not errors:
         return "end"
-    # Has errors → re-research
+    # Has errors -> re-research
     return "researcher"

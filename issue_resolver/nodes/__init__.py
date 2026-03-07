@@ -1,4 +1,4 @@
-"""Graph nodes — each function takes AgentState, returns a partial update."""
+"""Graph nodes -- each function takes AgentState, returns a partial update."""
 
 from issue_resolver.nodes.supervisor import supervisor_node
 from issue_resolver.nodes.researcher import researcher_node

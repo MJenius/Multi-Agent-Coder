@@ -1,5 +1,5 @@
 """
-Coder Node (Stub) — Phase 1 placeholder.
+Coder Node (Stub) -- Phase 1 placeholder.
 
 In Phase 2 this will use an LLM + code-editing tools to produce
 a patch / diff that resolves the issue.

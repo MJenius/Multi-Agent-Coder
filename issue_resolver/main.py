@@ -1,5 +1,5 @@
 """
-Phase 2 — Smoke Test Runner
+Phase 2 -- Smoke Test Runner
 
 Feeds a sample GitHub issue into the compiled graph and
 traces the Supervisor's routing decisions step by step.
@@ -32,14 +32,14 @@ Environment: Python 3.12, Ubuntu 24.04
 
 def main() -> None:
     print("=" * 60)
-    print("  Multi-Agent Issue Resolver — Phase 2 Smoke Test")
+    print("  Multi-Agent Issue Resolver -- Phase 2 Smoke Test")
     print("=" * 60)
 
     # Build & compile the graph
     app = build_graph()
 
     # Prepare the initial state
-    # Default repo path — override with env var or CLI arg in the future
+    # Default repo path -- override with env var or CLI arg in the future
     repo_path = "./sandbox_workspace"
 
     initial_state: AgentState = {
