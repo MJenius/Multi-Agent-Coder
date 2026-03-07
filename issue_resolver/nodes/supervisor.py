@@ -53,6 +53,11 @@ def supervisor_node(state: AgentState) -> dict:
     errors = state.get("errors", "")
     iterations = state.get("iterations", 0)
 
+    # HARD GUARD: If we have a fix and the last test run had NO errors, we are DONE.
+    if proposed_fix and not errors:
+        print("[Supervisor] [GUARD] Tests passed. Terminating graph.")
+        return {"next_step": "end", "iterations": iterations + 1}
+
     # Safety valve: prevent infinite loops
     if iterations >= 5:
         print("[Supervisor] [WARN] Max iterations reached -- triggering Graceful Exit.")
@@ -99,6 +104,12 @@ def supervisor_node(state: AgentState) -> dict:
         # If Ollama is unreachable, fall back to deterministic logic
         print(f"[Supervisor] [WARN] LLM call failed ({exc}); using rule-based fallback.")
         decision = _deterministic_decision(file_context, proposed_fix, errors)
+
+    # HARD GUARD: Override LLM if it violates basic logic
+    # This ensures Phase 2 tools ALWAYS run if context is empty
+    if not file_context and decision != "researcher":
+        print(f"[Supervisor] [GUARD] Overriding '{decision}' -> 'researcher' (no context).")
+        decision = "researcher"
 
     # Validate the decision
     if decision not in ("researcher", "coder", "end"):

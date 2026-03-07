@@ -27,35 +27,16 @@ _llm = ChatOllama(
 )
 
 _SYSTEM_PROMPT = """\
-You are the Coder agent in a multi-agent system that resolves GitHub issues.
+You are a Senior Software Engineer. Your task is to resolve a GitHub issue by 
+providing a functional fix in the form of a UNIFIED DIFF.
 
-Your ONLY job is to produce a Unified Diff that fixes the bug described in
-the issue.  You will be given:
-  1. The GitHub issue text.
-  2. Relevant source code snippets (with line numbers).
-  3. (Optional) Error feedback from a previous failed attempt.
-
-RULES -- follow these exactly:
-- Be SURGICAL: change ONLY the lines necessary to fix the bug. Do not
-  refactor, rename, or reorganise anything else.
-- Output ONLY a standard Unified Diff inside a fenced code block, like:
-
-```diff
---- a/path/to/file.py
-+++ b/path/to/file.py
-@@ -start,count +start,count @@
- context line
--removed line
-+added line
-```
-
-- The `@@` hunk headers MUST have accurate line numbers.  The code snippets
-  you receive already include line numbers -- use them to compute the correct
-  `@@ -start,count +start,count @@` values.
-- BEFORE writing the diff block, briefly explain your reasoning (e.g. "I will change X to Y because..."). This explanation will be logged for observability.
-- After reasoning, output ONLY a standard Unified Diff inside a fenced `diff` code block. 
-- If multiple files need changes, include all of them in a single diff block
-  with separate --- / +++ headers per file.
+CRITICAL RULES:
+1. BE SURGICAL: Only modify the lines necessary to fix the reported bug.
+2. LOGIC CHANGE REQUIRED: Your diff MUST change the functional code. 
+   - DO NOT just change comments, docstrings, or whitespace.
+   - If you cannot find a way to improve the code, do not output a diff.
+3. PATHS: Use relative paths from the repo root (e.g., 'src/utils.py'). 
+4. FORMAT: Output ONLY the diff inside a ```diff ... ``` markdown block.
 """
 
 
@@ -63,27 +44,32 @@ RULES -- follow these exactly:
 # Helper: extract diff from markdown fenced block
 # ---------------------------------------------------------------------------
 def _extract_diff(llm_output: str) -> str:
-    """Return the content between ```diff and ``` markers.
-
-    Falls back to the raw output if no fenced block is found.
-    """
-    # Try regex first for robustness (handles optional whitespace)
-    match = re.search(r"```diff\s*\n(.*?)```", llm_output, re.DOTALL)
-    if match:
-        return match.group(1).strip()
-
-    # Fallback: simple string search
+    """Return the content between ```diff and ``` markers."""
+    # Start marker
     start_marker = "```diff"
-    end_marker = "```"
-    start = llm_output.find(start_marker)
-    if start != -1:
-        start += len(start_marker)
-        end = llm_output.find(end_marker, start)
-        if end != -1:
-            return llm_output[start:end].strip()
+    start_pos = llm_output.find(start_marker)
+    
+    if start_pos == -1:
+        # Fallback: maybe they just did ``` without diff?
+        start_marker = "```"
+        start_pos = llm_output.find(start_marker)
+
+    if start_pos != -1:
+        content_start = start_pos + len(start_marker)
+        # Look for end marker
+        end_pos = llm_output.find("```", content_start)
+        if end_pos != -1:
+            return llm_output[content_start:end_pos].strip()
+        else:
+            # Not closed? Take the rest of the output
+            return llm_output[content_start:].strip()
 
     # No markers found -- return raw output (best effort)
-    return llm_output.strip()
+    # But only if it looks like a diff (simple check)
+    if "---" in llm_output and "+++" in llm_output:
+        return llm_output.strip()
+    
+    return ""
 
 
 # ---------------------------------------------------------------------------

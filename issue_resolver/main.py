@@ -60,15 +60,29 @@ def main() -> None:
     print(f"\n[ISSUE]\n{SAMPLE_ISSUE}")
     print("-" * 60)
 
-    # Stream the graph execution step by step
+    # Stream the graph execution step by step for visualization and accumulation
     print("\n[START] Starting graph execution...\n")
 
-    final_state = None
+    full_state = initial_state.copy()
     for step in app.stream(initial_state):
-        # Each step is a dict of {node_name: state_update}
+        # Each step in 'updates' mode is {node_name: state_update}
         for node_name, state_update in step.items():
             print(f"  -- Node '{node_name}' returned: {list(state_update.keys())}")
-        final_state = step
+            # Manually merge updates into full_state (simplified LangGraph-like merge)
+            for key, val in state_update.items():
+                if key == "history":
+                    full_state["history"] = full_state.get("history", []) + val
+                elif key == "file_context":
+                    # Simple merge for file context items (ensure uniqueness)
+                    # Note: in a real LangGraph setup, the State would handle this via define_reducer
+                    current_context = full_state.get("file_context", [])
+                    for item in val:
+                        if item not in current_context:
+                            current_context.append(item)
+                    full_state["file_context"] = current_context
+                else:
+                    full_state[key] = val
+    final_state = full_state # Preserve for report
 
     print("\n" + "=" * 60)
     print("  [OK] Graph completed!")
@@ -76,13 +90,10 @@ def main() -> None:
 
     # Print the final state summary and generate resolution_report.json
     if final_state:
-        # Get the last node's output
-        last_node = list(final_state.keys())[-1]
-        last_output = final_state[last_node]
-        print(f"\n[RESULT] Final state snapshot (from '{last_node}'):")
+        print("\n[RESULT] Final state snapshot:")
         
         # State summary printing
-        for key, value in last_output.items():
+        for key, value in final_state.items():
             if key == "history":
                 continue # Skip console dumping full history
             if isinstance(value, list):
@@ -95,10 +106,10 @@ def main() -> None:
         # Generate resolution_report.json
         print("\n[REPORT] Generating resolution_report.json...")
         
-        history = last_output.get("history", [])
-        total_iterations = last_output.get("iterations", 0)
-        final_errors = last_output.get("errors", "")
-        final_proposed_fix = last_output.get("proposed_fix", "")
+        history = final_state.get("history", [])
+        total_iterations = final_state.get("iterations", 0)
+        final_errors = final_state.get("errors", "")
+        final_proposed_fix = final_state.get("proposed_fix", "")
         
         # Extract metadata from history
         files_read = []
@@ -116,7 +127,7 @@ def main() -> None:
                 if '"read_file"' in content:
                     files_read.append(content)
                     
-            if node == "Reviewer" and action == "Apply Patch Failed" or action == "Test Execution":
+            if node == "Reviewer" and (action == "Apply Patch Failed" or action == "Test Execution"):
                 if "Error" in content or "Traceback" in content or "FAIL" in content or "failed" in content.lower():
                     failed_diffs.append({
                         "node": node,
@@ -125,12 +136,9 @@ def main() -> None:
                     })
         
         # Determine Success Path boolean
-        is_resolved = False
-        if final_proposed_fix and not final_errors:
-            is_resolved = True
-        elif len(history) > 0 and history[-1].get("action") == "Failure Summary":
-            is_resolved = False
-
+        # Success if it reached END and no errors remain
+        is_resolved = (final_proposed_fix and not final_errors and final_state.get("next_step") == "end")
+        
         report = {
             "is_resolved": is_resolved,
             "total_iterations": total_iterations,

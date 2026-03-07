@@ -25,18 +25,27 @@ graph TD
 ```
 
 ### 🧑‍💻 The Agents:
-- **Supervisor (`llama3.2:3b`)**: The intelligent router. Monitors the `AgentState`, preventing infinite loops and deciding whether it needs more research, a coding fix, or if it can gracefully exit and finalize the report.
+- **Supervisor (`llama3.2:3b`)**: The intelligent router. Monitors the `AgentState` with **Hard Guards**—deterministic logic that overrides the LLM to prevent infinite loops or premature exits. It ensures a graceful exit with a failure summary if a fix is not found within limits.
 - **Researcher (`llama3.2:3b`)**: Explores the local codebase utilizing custom tool binding (`list_files`, `search_code`, `read_file`). Keeps strict token & RAM constraints on file reads.
-- **Coder (`qwen2.5-coder:7b`)**: Extremely focused code generation model. Analyzes the file context against the GitHub issue and generates surgical string replace operations packaged as a `Unified Diff`.
-- **Reviewer (Deterministic)**: The Judge. Mounts the target code into an isolated, network-disabled **Docker Container**. Applies the Coder's patches and executes unit tests. Returns raw tracebacks if it fails.
+- **Coder (`qwen2.5-coder:7b`)**: Extremely focused code generation model. Analyzes the file context against the GitHub issue and generates surgical string replace operations. **Enforced Logic Rule:** It is strictly prohibited from generating "no-op" diffs (only comments/docs/whitespace).
+- **Reviewer (Deterministic)**: The Judge. Mounts the target code into an isolated, network-disabled **Docker Container**. It uses **Git-based baselines** to restore the sandbox environment between test runs, ensuring no side effects from failed patches.
 
 ---
 
 ## 🛠️ Technology Stack
 - **Framework:** [LangGraph](https://python.langchain.com/docs/langgraph) (Stateful multi-actor orchestration)
 - **Local Inference:** [Ollama](https://ollama.com/) (`llama3.2:3b` & `qwen2.5-coder:7b`)
-- **Isolation/Sandbox:** Docker Engine (python-slim container)
-- **Analytics & Logging:** Native Python traces & token estimations.
+- **Isolation/Sandbox:** Docker Engine (python-slim container with Git initialized)
+- **Analytics & Logging:** Structured JSON-based history & token estimation.
+
+---
+
+## ✨ Key Features
+- **Deterministic Flow Control**: Hard-coded guards in the Supervisor ensure the system terminates as soon as tests pass or limits are hit.
+- **Surgical Patching**: Coder produces standard Unified Diffs that are easily reviewable and applied via `patch`.
+- **Sandbox Isolation**: Code execution happens in a dedicated Docker sandbox with restricted permissions.
+- **Observability**: Every agent action, tool call, and reasoning block is captured in a chronological `history` log.
+- **Local-First**: All LLM inference happens on your machine via Ollama—no data leaves the local environment.
 
 ---
 
@@ -45,7 +54,7 @@ graph TD
 ### Prerequisites
 1. **Python 3.12+**
 2. **Docker Engine / Desktop** installed and running.
-3. **Ollama** installed with models pulled locally (approx. 16GB RAM constraints):
+3. **Ollama** installed with models pulled locally (approx. 16GB RAM recommended):
    ```bash
    ollama run llama3.2:latest
    ollama run qwen2.5-coder:7b
@@ -94,20 +103,24 @@ While the graph executes, comprehensive terminal logs will echo exactly what the
 ```
 
 ### 📊 Resolution Report
-Upon completion, the Supervisor generates a `resolution_report.json` showcasing the metrics of the run, mapping out iterations, token consumption, and trace logs:
+Upon completion, the system generates a `resolution_report.json` summarizing the entire run. This includes a `history` of every step:
 ```json
 {
     "is_resolved": true,
     "total_iterations": 3,
     "total_character_estimate": 1502,
-    "total_token_estimate": 375,
-    "files_read_summary": [
-        "Tool: read_file\nArgs: {\"file_path\": \"./sandbox_workspace/utils.py\"}"
-    ],
+    "files_read_summary": [...],
     "failed_diffs_and_tracebacks": [],
-    "final_successful_diff": "```diff\n--- a/utils.py\n+++ b/utils.py...",
-    "final_errors": null,
-    "full_history_trace": [...]
+    "final_successful_diff": "--- a/utils.py\n+++ b/utils.py...",
+    "history": [
+        {
+            "agent": "Supervisor",
+            "action": "Routing Decision",
+            "output": "researcher",
+            "timestamp": "2026-03-07T..."
+        },
+        ...
+    ]
 }
 ```
 
@@ -115,3 +128,4 @@ Upon completion, the Supervisor generates a `resolution_report.json` showcasing 
 
 ## ⚖️ License
 This project is licensed under the MIT License.
+

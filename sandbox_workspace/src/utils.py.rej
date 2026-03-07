@@ -1,6 +1,5 @@
-diff --git a/sandbox_workspace/src/utils.py b/sandbox_workspace/src/utils.py
---- a/sandbox_workspace/src/utils.py
-+++ b/sandbox_workspace/src/utils.py
+--- src/utils.py
++++ src/utils.py
 @@ -10,7 +10,7 @@ def calculate_total(items):
      """
      Calculate the total price from a list of items.
@@ -8,5 +7,5 @@ diff --git a/sandbox_workspace/src/utils.py b/sandbox_workspace/src/utils.py
 -    Each item is expected to have a `.price` attribute.
 +    Each item is expected to have a `.price` attribute. Returns 0 for an empty list.
      """
--    return sum(item.price for item in items)
-+    return sum(item.price for item in items) if items else 0
+ 
+ 

@@ -6,4 +6,9 @@ RUN apt-get update && \
 
 WORKDIR /workspace
 
+# Initialize git so 'git restore' and 'git clean' work for idempotency
+RUN git init && \
+    git config user.email "agent@resolver.local" && \
+    git config user.name "Agent Resolver"
+
 CMD ["tail", "-f", "/dev/null"]
