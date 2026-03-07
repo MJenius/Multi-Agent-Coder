@@ -1,8 +1,9 @@
 """
-Phase 1 — Smoke Test Runner
+Phase 2 — Smoke Test Runner
 
 Feeds a sample GitHub issue into the compiled graph and
 traces the Supervisor's routing decisions step by step.
+The Researcher now uses real tools to explore the target repo.
 
 Usage:
     python -m issue_resolver.main
@@ -31,21 +32,27 @@ Environment: Python 3.12, Ubuntu 24.04
 
 def main() -> None:
     print("=" * 60)
-    print("  Multi-Agent Issue Resolver — Phase 1 Smoke Test")
+    print("  Multi-Agent Issue Resolver — Phase 2 Smoke Test")
     print("=" * 60)
 
     # Build & compile the graph
     app = build_graph()
 
     # Prepare the initial state
+    # Default repo path — override with env var or CLI arg in the future
+    repo_path = "./sandbox_workspace"
+
     initial_state: AgentState = {
         "issue": SAMPLE_ISSUE,
+        "repo_path": repo_path,
         "file_context": [],
         "proposed_fix": "",
         "errors": "",
         "next_step": "",
         "iterations": 0,
     }
+
+    print(f"\n[REPO] Target repository: {repo_path}")
 
     print(f"\n[ISSUE]\n{SAMPLE_ISSUE}")
     print("-" * 60)
@@ -73,6 +80,11 @@ def main() -> None:
         for key, value in last_output.items():
             if isinstance(value, list):
                 print(f"  {key}: [{len(value)} item(s)]")
+                # Show file_context snippets
+                if key == "file_context":
+                    for i, snippet in enumerate(value, 1):
+                        preview = snippet[:200] + "..." if len(snippet) > 200 else snippet
+                        print(f"    [{i}] {preview}")
             elif isinstance(value, str) and len(value) > 80:
                 print(f"  {key}: {value[:80]}...")
             else:

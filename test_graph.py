@@ -8,6 +8,7 @@ def main():
     
     initial_state: AgentState = {
         "issue": "calculate_total crashes on empty list",
+        "repo_path": "./sandbox_workspace",
         "file_context": [],
         "proposed_fix": "",
         "errors": "",

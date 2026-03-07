@@ -19,6 +19,7 @@ class AgentState(TypedDict):
     """Typed dictionary representing the shared state of the agent graph."""
 
     issue: str
+    repo_path: str
     file_context: list[str]
     proposed_fix: str
     errors: str
