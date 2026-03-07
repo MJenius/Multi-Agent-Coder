@@ -79,3 +79,5 @@ def build_graph() -> StateGraph:
     compiled = graph.compile()
     print("[OK] Graph compiled successfully!")
     return compiled
+
+app = build_graph()

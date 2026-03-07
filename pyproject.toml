@@ -9,4 +9,7 @@ dependencies = [
     "psycopg[binary]",
     "fastapi",
     "uvicorn",
+    "streamlit",
+    "PyGithub",
+    "GitPython",
 ]
