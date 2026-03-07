@@ -1,0 +1,25 @@
+services:
+  # Persistence: Stores the state of your LangGraph "threads"
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: langgraph_state
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d langgraph_state"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Sandbox: Where the "Reviewer" agent runs LLM-generated code
+  # We use a python-slim image to keep it lightweight for your 16GB RAM
+  sandbox:
+    image: python:3.11-slim
+    volumes:
+      - ./sandbox_workspace:/workspace
+    working_dir: /workspace
+    network_mode: none # Security: No internet access for generated code
+    command: tail -f /dev/null # Keeps the container alive

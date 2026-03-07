@@ -1,0 +1,12 @@
+[project]
+name = "multi-agent-issue-resolver"
+version = "0.1.0"
+description = "Multi-Agent GitHub Issue Resolution System using LangGraph and Ollama"
+requires-python = ">=3.12"
+dependencies = [
+    "langgraph",
+    "langchain-ollama",
+    "psycopg[binary]",
+    "fastapi",
+    "uvicorn",
+]

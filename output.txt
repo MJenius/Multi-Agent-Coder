@@ -1,0 +1,59 @@
+﻿python : Traceback (most 
+recent call last):
+At line:1 char:1
++ python -m 
+issue_resolver.main 2>&1 | 
+Out-File -FilePath 
+output.txt -E ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~
+    + CategoryInfo           
+   : NotSpecified: (Traceba  
+  ck (most recent call las   
+ t)::String) [], RemoteEx    
+ception
+    + FullyQualifiedErrorId  
+   : NativeCommandError
+ 
+  File "<frozen runpy>", 
+line 198, in 
+_run_module_as_main
+  File "<frozen runpy>", 
+line 88, in _run_code
+  File "C:\Users\mjeni\OneDri
+ve\Desktop\Own 
+Projects\Multi Agent Coder\is
+sue_resolver\main.py", line 
+83, in <module>
+    main()
+  File "C:\Users\mjeni\OneDri
+ve\Desktop\Own 
+Projects\Multi Agent Coder\is
+sue_resolver\main.py", line 
+38, in main
+    app = build_graph()
+          ^^^^^^^^^^^^^
+  File "C:\Users\mjeni\OneDri
+ve\Desktop\Own 
+Projects\Multi Agent Coder\is
+sue_resolver\graph.py", line 
+72, in build_graph
+    print("\u2705 Graph 
+compiled successfully!")
+  File "C:\Python312\Lib\enco
+dings\cp1252.py", line 19, 
+in encode
+    return codecs.charmap_enc
+ode(input,self.errors,encodin
+g_table)[0]
+           ^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^
+UnicodeEncodeError: 
+'charmap' codec can't encode 
+character '\u2705' in 
+position 0: character maps 
+to <undefined>
+============================================================
+  Multi-Agent Issue Resolver ù Phase 1 Smoke Test
+============================================================
