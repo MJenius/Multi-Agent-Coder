@@ -21,16 +21,24 @@ from langchain_core.tools import tool
 # ---------------------------------------------------------------------------
 @tool
 def list_files(directory: str) -> str:
-    """Recursively list all .py files in a directory to understand project structure.
+    """Recursively list all .py files in a DIRECTORY to understand project structure.
+    
+    CRITICAL: This tool ONLY accepts directory paths (like '.' or './src'). 
+    DO NOT pass a specific file path (like 'src/main.py') to this tool.
+    If you want to view a file, use the 'read_file' tool instead.
 
     Args:
         directory: Absolute or relative path to the root directory to scan.
 
     Returns:
-        A newline-separated list of .py file paths relative to *directory*,
-        capped at 200 entries.
+        A newline-separated list of .py file paths.
     """
     root = Path(directory).resolve()
+    
+    # HARD GUARD: If it's a file, return an explicit error string to guide the LLM
+    if root.is_file():
+        return f"ERROR: '{directory}' is a FILE. You must use the 'read_file' tool to see its contents."
+        
     if not root.is_dir():
         return f"Error: '{directory}' is not a valid directory."
 

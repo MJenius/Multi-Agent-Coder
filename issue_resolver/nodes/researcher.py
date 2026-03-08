@@ -53,11 +53,11 @@ Strategy:
 2. Then call search_code for key function / class names mentioned in the issue.
 3. Finally call read_file on the most relevant files (max 3 files).
 
-IMPORTANT CONSTRAINTS:
+CRITICAL CONSTRAINTS:
+- NEVER use 'list_files' on a specific file (e.g., a .py file). 
+- To see what is inside a file, you MUST use 'read_file'.
 - Do NOT read more than 3 files total.
 - Prefer short, targeted reads over reading everything.
-- When you have gathered enough context, stop calling tools and summarise
-  what you found in a short final message.
 """
 
 

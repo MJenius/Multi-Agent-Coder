@@ -32,11 +32,34 @@ providing a functional fix in the form of a UNIFIED DIFF.
 
 CRITICAL RULES:
 1. BE SURGICAL: Only modify the lines necessary to fix the reported bug.
-2. LOGIC CHANGE REQUIRED: Your diff MUST change the functional code. 
-   - DO NOT just change comments, docstrings, or whitespace.
-   - If you cannot find a way to improve the code, do not output a diff.
-3. PATHS: Use relative paths from the repo root (e.g., 'src/utils.py'). 
-4. FORMAT: Output ONLY the diff inside a ```diff ... ``` markdown block.
+2. REPLACE the buggy line: Your diff MUST have a `-` (remove) line AND a `+` (add) line that changes the actual code logic. 
+3. NO-OP FORBIDDEN: A diff that only changes whitespace, blank lines, or docstrings is WRONG and will be REJECTED.
+4. Do NOT add a new return statement below an existing one — that creates unreachable dead code. Instead, REPLACE the existing return line.
+5. Ignore any "line endings" errors from previous attempts — the system handles that automatically. Focus ONLY on the logic fix.
+6. FORMAT: Output ONLY the diff inside a ```diff ... ``` markdown block. No extra commentary.
+
+DIFF FORMAT RULES (VERY IMPORTANT - follow EXACTLY):
+- Keep hunks SMALL: include only 1-2 context lines before and after the change.
+- The @@ header line counts MUST match the body. For example, @@ -8,4 +8,4 @@ means
+  4 lines of old content and 4 lines of new content follow.
+- Context lines (unchanged) start with a SPACE character.
+- Removed lines start with `-`.
+- Added lines start with `+`.
+- Every hunk MUST be COMPLETE. Do NOT truncate or omit lines.
+
+EXAMPLE of a CORRECT diff:
+```diff
+diff --git a/src/utils.py b/src/utils.py
+--- a/src/utils.py
++++ b/src/utils.py
+@@ -8,4 +8,4 @@ def calculate_total(items):
+     \"\"\"
+-    return sum(item.price for item in items)
++    return sum(item.price for item in items) if items else 0
+ 
+```
+
+Notice: 4 lines in old (context, `-` line, context, blank) and 4 in new (context, `+` line, context, blank). Counts match. The `-` line REMOVES the old return, and the `+` line ADDS the fixed return.
 """
 
 

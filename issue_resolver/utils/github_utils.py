@@ -2,6 +2,9 @@ import os
 import git
 from github import Github
 from typing import Tuple
+import shutil
+import stat
+from issue_resolver.tools.sandbox_tools import clean_sandbox
 
 def fetch_issue_details(repo_full_name: str, issue_number: int, token: str) -> Tuple[str, str]:
     """
@@ -39,16 +42,34 @@ def submit_pull_request(
     # or handle file writes if it's a full file.
     # The requirement says 'apply the proposed_fix', which usually implies a diff in this system.
     
-    import subprocess
+    import docker
     patch_path = os.path.join(repo_path, "fix.patch")
-    with open(patch_path, "w") as f:
+    with open(patch_path, "w", encoding="utf-8") as f:
+        if not proposed_fix.endswith("\n"):
+            proposed_fix += "\n"
         f.write(proposed_fix)
     
     try:
-        subprocess.run(["patch", "-p1", "-i", "fix.patch"], cwd=repo_path, check=True)
+        # Use the sandbox container to reliably apply the patch since Windows native doesn't have `patch`
+        client = docker.from_env()
+        containers = client.containers.list(filters={"label": "com.issue_resolver.role=sandbox"})
+        if not containers:
+            raise Exception("Sandbox container not found; cannot apply patch.")
+        sandbox = containers[0]
+        
+        # We must reset any uncommitted changes from the test run so we don't double-apply
+        sandbox.exec_run("git reset --hard", workdir="/workspace")
+        
+        # Apply the patch using the fuzzy Linux patching tool
+        res = sandbox.exec_run(["bash", "-c", "patch -l --fuzz=3 -p1 < fix.patch"], workdir="/workspace")
         os.remove(patch_path)
-    except subprocess.CalledProcessError as e:
-        os.remove(patch_path)
+        
+        if res.exit_code != 0:
+            raise Exception(f"Sandbox patch failed: {res.output.decode('utf-8', errors='ignore')}")
+            
+    except Exception as e:
+        if os.path.exists(patch_path):
+            os.remove(patch_path)
         raise Exception(f"Failed to apply patch: {e}")
 
     # Commit and push
@@ -70,4 +91,22 @@ def submit_pull_request(
         base=base_branch
     )
     
+    # 7. CLEAN THE SANDBOX AFTER SUBMISSION
+    # Container cleanup
+    try:
+        clean_sandbox()
+    except:
+        pass # Best effort
+
+    # Host-side local workspace cleanup
+    def _rmtree_readonly(func, path, excinfo):
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+
+    try:
+        if os.path.exists(repo_path):
+            shutil.rmtree(repo_path, onerror=_rmtree_readonly)
+    except:
+        pass # Best effort
+
     return pr.html_url

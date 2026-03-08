@@ -8,7 +8,7 @@ inside the Docker container and returns any test errors.
 from __future__ import annotations
 
 from issue_resolver.state import AgentState
-from issue_resolver.tools.sandbox_tools import apply_diff_in_sandbox, run_main_in_sandbox
+from issue_resolver.tools.sandbox_tools import apply_diff_in_sandbox, run_tests_in_sandbox
 from issue_resolver.utils.logger import append_to_history
 
 
@@ -33,9 +33,9 @@ def reviewer_node(state: AgentState) -> dict:
         print("[Reviewer] [FAIL] Patch failed to apply.")
         return {"errors": f"Failed to apply patch:\n{patch_output}", "history": append_to_history("Reviewer", "Apply Patch Failed", patch_output)}
 
-    # 2. Run the main application
+    # 2. Run the main application or auto-generated tests
     print("[Reviewer] Running validation in sandbox...")
-    success, output = run_main_in_sandbox()
+    success, output = run_tests_in_sandbox(proposed_fix)
 
     # 3. Handle the result
     history_additions = append_to_history("Reviewer", "Test Execution", output)
@@ -46,5 +46,5 @@ def reviewer_node(state: AgentState) -> dict:
     else:
         print("[Reviewer] [FAIL] Code execution failed.")
         # output is already decoded and stripped of special characters
-        # via the run_main_in_sandbox tool
+        # via the run_tests_in_sandbox tool
         return {"errors": output, "history": history_additions}

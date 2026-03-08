@@ -56,7 +56,7 @@ def supervisor_node(state: AgentState) -> dict:
     # HARD GUARD: If we have a fix and the last test run had NO errors, we are DONE.
     if proposed_fix and not errors:
         print("[Supervisor] [GUARD] Tests passed. Terminating graph.")
-        return {"next_step": "end", "iterations": iterations + 1}
+        return {"next_step": "end", "iterations": iterations + 1, "is_resolved": True}
 
     # Safety valve: prevent infinite loops
     if iterations >= 5:
