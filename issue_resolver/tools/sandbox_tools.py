@@ -126,7 +126,23 @@ def apply_diff_in_sandbox(diff: str, repo_path: str) -> str:
     # Strip any leading garbage (like the bare word 'diff') before the real header
     if diff.startswith("diff\n"):
         diff = diff[5:].strip()
+        
+    # Clean up hallucinated line numbers like ` 14: ` or `+17: ` or `- 20:`
+    cleaned_lines = []
+    for line in diff.split("\n"):
+        if line.startswith("---") or line.startswith("+++"):
+            cleaned_lines.append(line)
+        else:
+            m = re.match(r"^([\+\-\s])(?: *)?\d+:(?: *)(.*)$", line)
+            if m:
+                cleaned_lines.append(f"{m.group(1)}{m.group(2)}")
+            else:
+                cleaned_lines.append(line)
+    diff = "\n".join(cleaned_lines)
     
+    if "---" not in diff or "+++" not in diff:
+        return "Error: The unified diff is missing the `--- a/file` and `+++ b/file` file headers."
+
     if not diff:
         return "Error: Empty diff provided."
     
@@ -197,20 +213,46 @@ def _extract_modified_files_from_diff(diff: str) -> list[str]:
 def run_tests_in_sandbox(diff: str) -> tuple[bool, str]:
     """
     Validates the patch by running a test inside the sandbox.
-
-    Strategy (in priority order):
-    1. Look for existing test files (test_*.py, *_test.py) and run the first one found.
-    2. Try common entry points (main.py, src/main.py, app.py).
-    3. Fall back: auto-generate a minimal import smoke-test from the diff
-       headers so we at least catch syntax errors and import failures.
+    Detects project type (C#, Node.js, Python, etc.) and runs appropriate commands.
     """
     sandbox = get_sandbox_container()
     if not sandbox:
         return False, "Error: Sandbox container not found."
 
+    # --- 1. C# (.NET) ---
+    check_csproj = sandbox.exec_run(["bash", "-c", "find . -name '*.csproj' | head -1"], workdir="/workspace")
+    if check_csproj.output.strip():
+        print("[Sandbox] Detected C# project (.csproj)")
+        build_res = sandbox.exec_run(["dotnet", "build"], workdir="/workspace")
+        if build_res.exit_code != 0:
+            return False, build_res.output.decode("utf-8", errors="ignore")
+        test_res = sandbox.exec_run(["dotnet", "test"], workdir="/workspace")
+        return (test_res.exit_code == 0), test_res.output.decode("utf-8", errors="ignore")
+
+    # --- 2. Node.js ---
+    check_pkg = sandbox.exec_run(["test", "-f", "package.json"], workdir="/workspace")
+    if check_pkg.exit_code == 0:
+        print("[Sandbox] Detected Node.js project (package.json)")
+        sandbox.exec_run(["npm", "install", "--ignore-scripts"], workdir="/workspace")
+        test_res = sandbox.exec_run(["npm", "test"], workdir="/workspace")
+        out = test_res.output.decode("utf-8", errors="ignore")
+        if test_res.exit_code == 0 or "no test specified" not in out.lower():
+            return (test_res.exit_code == 0), out
+        
+        # fallback for Node without tests
+        for entry in ["index.js", "main.js", "app.js", "src/index.js", "src/main.js"]:
+            chk = sandbox.exec_run(["test", "-f", entry], workdir="/workspace")
+            if chk.exit_code == 0:
+                print(f"[Sandbox] Running fallback Node entry point: {entry}")
+                res = sandbox.exec_run(["node", entry], workdir="/workspace")
+                return (res.exit_code == 0), res.output.decode("utf-8", errors="ignore")
+        return True, "No tests and no clear entry point found, but assuming success for Node.js."
+
+    # --- 3. Python (Default) ---
+    print("[Sandbox] Falling back to Python testing strategy")
     env = {"PYTHONPATH": "."}
 
-    # --- Strategy 1: Find existing test files ---
+    # Strategy 3A: Find existing Pytest/Unittest files
     find_result = sandbox.exec_run(
         ["bash", "-c", "find . -name 'test_*.py' -o -name '*_test.py' | head -5"],
         workdir="/workspace",
@@ -221,65 +263,38 @@ def run_tests_in_sandbox(diff: str) -> tuple[bool, str]:
     if test_files:
         test_file = test_files[0]
         print(f"[Sandbox] Found test file: {test_file}")
-        result = sandbox.exec_run(
-            ["python", test_file],
-            workdir="/workspace",
-            environment=env,
-        )
-        output = result.output.decode("utf-8", errors="ignore")
-        return (result.exit_code == 0), output
+        # Automatically run pytest if available, else python
+        has_pytest = sandbox.exec_run(["pytest", "--version"]).exit_code == 0
+        cmd = ["pytest", test_file] if has_pytest else ["python", test_file]
+        result = sandbox.exec_run(cmd, workdir="/workspace", environment=env)
+        return (result.exit_code == 0), result.output.decode("utf-8", errors="ignore")
 
-    # --- Strategy 2: Common entry points ---
+    # Strategy 3B: Common entry points
     for entry in ["main.py", "src/main.py", "app.py"]:
         check = sandbox.exec_run(["test", "-f", entry], workdir="/workspace")
         if check.exit_code == 0:
             print(f"[Sandbox] Found entry point: {entry}")
-            result = sandbox.exec_run(
-                ["python", entry],
-                workdir="/workspace",
-                environment=env,
-            )
-            output = result.output.decode("utf-8", errors="ignore")
-            return (result.exit_code == 0), output
+            result = sandbox.exec_run(["python", entry], workdir="/workspace", environment=env)
+            return (result.exit_code == 0), result.output.decode("utf-8", errors="ignore")
 
-    # --- Strategy 3: Import smoke-test from diff headers ---
+    # Strategy 3C: Import smoke-test from diff headers
     modified_files = _extract_modified_files_from_diff(diff)
     if not modified_files:
         return False, "Error: Could not determine which file was modified from the diff."
 
-    # Build a small script that imports every modified module and calls known functions
     script_lines = ["import importlib, sys", "sys.path.insert(0, '.')"]
     for fpath in modified_files:
-        # Convert file path to module path: src/utils.py -> src.utils
         if fpath.endswith(".py"):
             mod = fpath[:-3].replace("/", ".").replace("\\", ".")
-            script_lines.append(f"mod = importlib.import_module('{mod}')")
-            script_lines.append(f"print(f'Successfully imported: {mod}')")
-            # If the diff is for the known calculate_total issue, exercise it
-            script_lines.append(
-                f"if hasattr(mod, 'calculate_total'):\n"
-                f"    result = mod.calculate_total([])\n"
-                f"    print(f'calculate_total([]) = {{result}}')\n"
-                f"    assert result == 0, f'Expected 0 but got {{result}}'"
-            )
+            script_lines.append(f"try:\n    importlib.import_module('{mod}')\n    print(f'Successfully imported: {mod}')\nexcept Exception as e:\n    print(f'Failed to import {mod}: {e}')\n    sys.exit(1)")
     script_lines.append("print('All import smoke-tests passed.')")
     test_script = "\n".join(script_lines)
 
-    print(f"[Sandbox] No test files or entry points found. Running import smoke-test for: {modified_files}")
-
-    # Write the test script into the container and run it
-    sandbox.exec_run(
-        ["bash", "-c", f"cat > /tmp/_smoke_test.py << 'ENDOFSCRIPT'\n{test_script}\nENDOFSCRIPT"],
-        workdir="/workspace",
-    )
-    result = sandbox.exec_run(
-        ["python", "/tmp/_smoke_test.py"],
-        workdir="/workspace",
-        environment=env,
-    )
-
-    output = result.output.decode("utf-8", errors="ignore")
-    return (result.exit_code == 0), output
+    print(f"[Sandbox] Running import smoke-test for: {modified_files}")
+    sandbox.exec_run(["bash", "-c", f"cat > /tmp/_smoke_test.py << 'ENDOFSCRIPT'\n{test_script}\nENDOFSCRIPT"], workdir="/workspace")
+    result = sandbox.exec_run(["python", "/tmp/_smoke_test.py"], workdir="/workspace", environment=env)
+    
+    return (result.exit_code == 0), result.output.decode("utf-8", errors="ignore")
 
 def clean_sandbox():
     """

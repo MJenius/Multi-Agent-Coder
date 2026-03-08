@@ -108,7 +108,8 @@ if st.button("🚀 Start Resolution Process"):
         }
 
         # 4. Stream Execution
-        st.write("### 🧠 Agent Thought Trace")
+        trace_header = st.empty()
+        trace_header.write("### 🧠 Agent Thought Trace")
         thought_container = st.empty()
         thought_log = ""
         
@@ -123,6 +124,10 @@ if st.button("🚀 Start Resolution Process"):
                         thought_container.markdown(f'<div class="thought-trace">{thought_log}</div>', unsafe_allow_html=True)
                 
                 final_state.update(state_update)
+                
+        # Remove the trace window when execution finishes
+        trace_header.empty()
+        thought_container.empty()
 
         # Store in session state for persistence
         # Compute is_resolved from evidence as fallback

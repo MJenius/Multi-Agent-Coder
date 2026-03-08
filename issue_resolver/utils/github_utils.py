@@ -43,11 +43,33 @@ def submit_pull_request(
     # The requirement says 'apply the proposed_fix', which usually implies a diff in this system.
     
     import docker
+    from issue_resolver.tools.sandbox_tools import _repair_diff_hunks
+    import re
+    
+    # 1. Clean the diff the same way the sandbox does before patching
+    diff = proposed_fix.replace("\r\n", "\n").strip()
+    diff = diff.replace("sandbox_workspace/", "")
+    if diff.startswith("diff\n"):
+        diff = diff[5:].strip()
+        
+    cleaned_lines = []
+    for line in diff.split("\n"):
+        if line.startswith("---") or line.startswith("+++"):
+            cleaned_lines.append(line)
+        else:
+            m = re.match(r"^([\+\-\s])(?: *)?\d+:(?: *)(.*)$", line)
+            if m:
+                cleaned_lines.append(f"{m.group(1)}{m.group(2)}")
+            else:
+                cleaned_lines.append(line)
+    diff = "\n".join(cleaned_lines)
+    diff = _repair_diff_hunks(diff)
+    
     patch_path = os.path.join(repo_path, "fix.patch")
     with open(patch_path, "w", encoding="utf-8") as f:
-        if not proposed_fix.endswith("\n"):
-            proposed_fix += "\n"
-        f.write(proposed_fix)
+        if not diff.endswith("\n"):
+            diff += "\n"
+        f.write(diff)
     
     try:
         # Use the sandbox container to reliably apply the patch since Windows native doesn't have `patch`

@@ -22,6 +22,7 @@ class AgentState(TypedDict):
     issue: str
     repo_path: str
     file_context: list[str]
+    plan: str
     proposed_fix: str
     errors: str
     next_step: str

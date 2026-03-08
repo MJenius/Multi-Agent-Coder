@@ -10,10 +10,13 @@ def main():
         "issue": "calculate_total crashes on empty list",
         "repo_path": "./sandbox_workspace",
         "file_context": [],
+        "plan": "",
         "proposed_fix": "",
         "errors": "",
         "next_step": "",
         "iterations": 0,
+        "is_resolved": False,
+        "history": [],
     }
     
     print("Starting graph...")

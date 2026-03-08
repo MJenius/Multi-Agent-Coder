@@ -17,7 +17,14 @@ from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, Tool
 
 from issue_resolver.state import AgentState
 from issue_resolver.utils.logger import append_to_history
-from issue_resolver.tools import REPO_TOOLS, list_files, search_code, read_file
+from issue_resolver.tools import (
+    REPO_TOOLS, 
+    list_files, 
+    search_code, 
+    read_file,
+    generate_repo_map,
+    get_symbol_definition
+)
 
 
 # ---------------------------------------------------------------------------
@@ -36,28 +43,35 @@ _TOOL_MAP = {
     "list_files": list_files,
     "search_code": search_code,
     "read_file": read_file,
+    "generate_repo_map": generate_repo_map,
+    "get_symbol_definition": get_symbol_definition,
 }
 
 _SYSTEM_PROMPT = """\
 You are the Researcher agent in a multi-agent system that resolves GitHub issues.
 
 Your job is to explore a LOCAL code repository and find the source code
-relevant to the issue.  You have three tools:
+relevant to the issue using a Map-Reduce strategy.  
 
-  list_files(directory)        - recursively list all .py files
-  search_code(query, directory) - grep for a string across .py files
-  read_file(file_path)          - read a file (truncated at 500 lines)
+You have the following tools:
+  generate_repo_map(directory)      - Get a high-level tree view of the repo + README.
+  get_symbol_definition(symbol, dir) - Find where a function or class is defined.
+  list_files(directory)             - Recursively list code files.
+  search_code(query, directory)     - Grep for a string across all code files.
+  read_file(file_path)              - Read a file (truncated at 500 lines).
 
-Strategy:
-1. FIRST call list_files to see the project layout.
-2. Then call search_code for key function / class names mentioned in the issue.
-3. Finally call read_file on the most relevant files (max 3 files).
+Map-Reduce Strategy:
+1. MAP phase: ALWAYS call `generate_repo_map('.')` FIRST to understand the structure.
+2. TARGET phase: Based on the map and the issue, look for Integration Points.
+   - Use `get_symbol_definition` if you know exactly what is crashing.
+   - Or use `search_code` to grep for relevant strings.
+3. REDUCE (READ) phase: Call `read_file` to collect context on the most relevant files.
 
 CRITICAL CONSTRAINTS:
-- NEVER use 'list_files' on a specific file (e.g., a .py file). 
+- NEVER use 'list_files' on a specific file. 
 - To see what is inside a file, you MUST use 'read_file'.
 - Do NOT read more than 3 files total.
-- Prefer short, targeted reads over reading everything.
+- Prefer targeted reads over reading everything.
 """
 
 
@@ -78,15 +92,17 @@ def researcher_node(state: AgentState) -> dict:
 
     repo_path = state.get("repo_path", ".")
     issue_text = state.get("issue", "(no issue provided)")
+    errors = state.get("errors", "")
+
+    human_str = f"GitHub Issue:\n{issue_text}\n\nRepository path: {repo_path}\n\n"
+    if errors:
+        human_str += f"Supervisor Feedback/Errors:\n{errors}\n\n"
+    human_str += "Please explore the repository and find the relevant code."
 
     # Seed the conversation with system prompt + issue
     messages = [
         SystemMessage(content=_SYSTEM_PROMPT),
-        HumanMessage(content=(
-            f"GitHub Issue:\n{issue_text}\n\n"
-            f"Repository path: {repo_path}\n\n"
-            "Please explore the repository and find the relevant code."
-        )),
+        HumanMessage(content=human_str),
     ]
 
     snippets: list[str] = list(state.get("file_context", []))

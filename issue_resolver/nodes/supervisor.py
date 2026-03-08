@@ -111,6 +111,11 @@ def supervisor_node(state: AgentState) -> dict:
         print(f"[Supervisor] [GUARD] Overriding '{decision}' -> 'researcher' (no context).")
         decision = "researcher"
 
+    new_errors = errors
+    if decision == "researcher" and not file_context and iterations > 0:
+        print("[Supervisor] [GUARD] Search Dead-End detected. Forcing broader search guidelines.")
+        new_errors = "Search Dead-End: Previous search found no relevant logic. You MUST broaden your search, check build files, or read documentation."
+
     # Validate the decision
     if decision not in ("researcher", "coder", "end"):
         print(f"[Supervisor] [WARN] Unexpected LLM output '{decision}'; using fallback.")
@@ -119,11 +124,16 @@ def supervisor_node(state: AgentState) -> dict:
     history_addition = append_to_history("Supervisor", "Routing Decision", decision)
 
     print(f"[Supervisor] [ROUTE] Decision -> {decision}  (iteration {iterations + 1})")
-    return {
+    
+    out_state = {
         "next_step": decision, 
         "iterations": iterations + 1,
         "history": history_addition
     }
+    if new_errors != errors:
+        out_state["errors"] = new_errors
+        
+    return out_state
 
 
 # ---------------------------------------------------------------------------
