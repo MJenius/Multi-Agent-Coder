@@ -17,15 +17,16 @@ from langchain_core.messages import SystemMessage, HumanMessage
 
 from issue_resolver.state import AgentState
 from issue_resolver.utils.logger import append_to_history
+from issue_resolver.config import OLLAMA_BASE_URL, CODER_MODEL, CODER_NUM_PREDICT
 
 # ---------------------------------------------------------------------------
 # LLM
 # ---------------------------------------------------------------------------
 _llm = ChatOllama(
-    model="qwen2.5-coder:7b",
+    model=CODER_MODEL,
     temperature=0,
-    base_url="http://localhost:11434",
-    num_predict=1024,
+    base_url=OLLAMA_BASE_URL,
+    num_predict=CODER_NUM_PREDICT,
 )
 
 _SYSTEM_PROMPT = """\

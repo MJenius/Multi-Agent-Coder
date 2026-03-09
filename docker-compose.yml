@@ -3,13 +3,13 @@ services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: user
-      POSTGRES_PASSWORD: password
-      POSTGRES_DB: langgraph_state
+      POSTGRES_USER: ${POSTGRES_USER:-user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRES_DB: ${POSTGRES_DB:-langgraph_state}
     ports:
       - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U user -d langgraph_state"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-user} -d ${POSTGRES_DB:-langgraph_state}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -23,7 +23,10 @@ services:
     labels:
       - "com.issue_resolver.role=sandbox"
     volumes:
-      - ./sandbox_workspace:/workspace
+      - ${SANDBOX_WORKSPACE_DIR:-./sandbox_workspace}:/workspace
     working_dir: /workspace
     network_mode: none # Security: No internet access for generated code
+    mem_limit: 2g
+    cpus: "2.0"
+    pids_limit: 256
     command: tail -f /dev/null # Keeps the container alive

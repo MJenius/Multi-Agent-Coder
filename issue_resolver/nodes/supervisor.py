@@ -19,15 +19,16 @@ from langchain_core.messages import SystemMessage, HumanMessage
 
 from issue_resolver.state import AgentState
 from issue_resolver.utils.logger import append_to_history
+from issue_resolver.config import OLLAMA_BASE_URL, SUPERVISOR_MODEL, MAX_ITERATIONS
 
 
 # ---------------------------------------------------------------------------
-# LLM setup -- swap model / base_url as needed
+# LLM setup
 # ---------------------------------------------------------------------------
 _llm = ChatOllama(
-    model="llama3.2:latest",
+    model=SUPERVISOR_MODEL,
     temperature=0,          # deterministic routing
-    base_url="http://localhost:11434",
+    base_url=OLLAMA_BASE_URL,
 )
 
 _SYSTEM_PROMPT = """\
@@ -51,15 +52,33 @@ def supervisor_node(state: AgentState) -> dict:
     file_context = state.get("file_context", [])
     proposed_fix = state.get("proposed_fix", "")
     errors = state.get("errors", "")
+    validation_status = state.get("validation_status", "")
     iterations = state.get("iterations", 0)
 
-    # HARD GUARD: If we have a fix and the last test run had NO errors, we are DONE.
+    # HARD GUARD: Tri-state validation check
     if proposed_fix and not errors:
-        print("[Supervisor] [GUARD] Tests passed. Terminating graph.")
-        return {"next_step": "end", "iterations": iterations + 1, "is_resolved": True}
+        if validation_status == "passed":
+            print("[Supervisor] [GUARD] Tests passed. Terminating graph.")
+            return {"next_step": "end", "iterations": iterations + 1, "is_resolved": True}
+        if validation_status == "inconclusive":
+            print("[Supervisor] [GUARD] Validation inconclusive (Docker unavailable). Accepting fix with warning.")
+            return {
+                "next_step": "end",
+                "iterations": iterations + 1,
+                "is_resolved": True,
+                "history": append_to_history(
+                    "Supervisor", "Warning",
+                    "Fix accepted but NOT validated in sandbox. Manual verification recommended."
+                ),
+            }
+        # validation_status is empty or unknown but no errors — treat as passed
+        # (backwards compat: reviewer may not have set validation_status yet)
+        if not validation_status:
+            print("[Supervisor] [GUARD] No errors and no validation_status. Accepting fix.")
+            return {"next_step": "end", "iterations": iterations + 1, "is_resolved": True}
 
     # Safety valve: prevent infinite loops
-    if iterations >= 5:
+    if iterations >= MAX_ITERATIONS:
         print("[Supervisor] [WARN] Max iterations reached -- triggering Graceful Exit.")
         
         # Ask LLM for a failure summary
@@ -103,7 +122,7 @@ def supervisor_node(state: AgentState) -> dict:
     except Exception as exc:
         # If Ollama is unreachable, fall back to deterministic logic
         print(f"[Supervisor] [WARN] LLM call failed ({exc}); using rule-based fallback.")
-        decision = _deterministic_decision(file_context, proposed_fix, errors)
+        decision = _deterministic_decision(file_context, proposed_fix, errors, validation_status)
 
     # HARD GUARD: Override LLM if it violates basic logic
     # This ensures Phase 2 tools ALWAYS run if context is empty
@@ -119,7 +138,7 @@ def supervisor_node(state: AgentState) -> dict:
     # Validate the decision
     if decision not in ("researcher", "coder", "end"):
         print(f"[Supervisor] [WARN] Unexpected LLM output '{decision}'; using fallback.")
-        decision = _deterministic_decision(file_context, proposed_fix, errors)
+        decision = _deterministic_decision(file_context, proposed_fix, errors, validation_status)
         
     history_addition = append_to_history("Supervisor", "Routing Decision", decision)
 
@@ -143,12 +162,13 @@ def _deterministic_decision(
     file_context: list[str],
     proposed_fix: str,
     errors: str,
+    validation_status: str = "",
 ) -> str:
     if not file_context:
         return "researcher"
     if not proposed_fix:
         return "coder"
-    if not errors:
+    if not errors and validation_status in ("passed", "inconclusive", ""):
         return "end"
     # Has errors -> retry coder with error feedback
     return "coder"

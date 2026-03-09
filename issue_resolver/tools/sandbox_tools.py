@@ -280,23 +280,14 @@ def run_tests_in_sandbox(diff: str) -> tuple[bool, str]:
                     return True, "Build succeeded. Tests skipped (offline mode, NuGet unavailable)"
                 return False, test_out
         
-        # Priority 2: No test project found — find and build the core QRCoder library project
+        # Priority 2: No test project found — find and build a core library project
         print("[Sandbox] No suitable test project found. Attempting to build library projects...")
         find_res = sandbox.exec_run(
-            ["bash", "-c", 
-             "find . -name 'QRCoder.csproj' ! -path '*Xaml*' ! -path '*UWP*' | head -1"],
+            ["bash", "-c",
+             "find . -name '*.csproj' ! -path '*[Tt]est*' ! -path '*[Dd]emo*' ! -path '*[Cc]onsole*' ! -path '*UWP*' ! -path '*Xaml*' ! -path '*ApiTests*' ! -path '*Benchmark*' ! -path '*Sample*' | head -1"],
             workdir="/workspace"
         )
         lib_proj = find_res.output.decode("utf-8", errors="ignore").strip()
-        
-        if not lib_proj:
-            # If no QRCoder.csproj, find any non-test, non-windows project
-            find_res = sandbox.exec_run(
-                ["bash", "-c",
-                 "find . -name '*.csproj' ! -path '*test*' ! -path '*demo*' ! -path '*console*' ! -path '*UWP*' ! -path '*Xaml*' ! -path '*ApiTests*' | head -1"],
-                workdir="/workspace"
-            )
-            lib_proj = find_res.output.decode("utf-8", errors="ignore").strip()
         
         if lib_proj:
             print(f"[Sandbox] Building library project: {lib_proj}")

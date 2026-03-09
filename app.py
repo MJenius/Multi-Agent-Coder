@@ -5,6 +5,7 @@ import git
 import json
 from issue_resolver.graph import app as agent_graph
 from issue_resolver.utils.github_utils import fetch_issue_details, submit_pull_request
+from issue_resolver.config import SANDBOX_WORKSPACE_DIR
 
 import stat
 
@@ -53,7 +54,7 @@ with st.sidebar:
     issue_number = st.number_input("Issue Number", min_value=1, step=1)
     
     st.header("System Settings")
-    sandbox_dir = os.path.abspath("sandbox_workspace")
+    sandbox_dir = SANDBOX_WORKSPACE_DIR
     if st.button("Clear Sandbox"):
         if os.path.exists(sandbox_dir):
             shutil.rmtree(sandbox_dir, onerror=_rmtree_readonly)
@@ -71,10 +72,6 @@ if st.button("🚀 Start Resolution Process"):
                 st.success(f"Fetched Issue: {title}")
                 issue_content = f"Title: {title}\n\nBody: {body}"
                 issue_content += "\n\nCRITICAL INSTRUCTION: The repository code is located strictly inside the './sandbox_workspace' directory. Do not search the root directory '.'"
-                
-                # Add strategic hint for SOTA projects (like QRCoder)
-                if "qr" in body.lower() or "ascii" in body.lower():
-                    issue_content += "\n\n🎯 HINT: QRCoder/AsciiQRCode.cs"
             except Exception as e:
                 st.error(f"Error fetching issue: {e}")
                 st.stop()
@@ -102,30 +99,39 @@ if st.button("🚀 Start Resolution Process"):
         # 3. Initialize State and Graph
         initial_state = {
             "issue": issue_content,
-            "repo_path": "./sandbox_workspace",
+            "repo_path": sandbox_dir,
             "file_context": [],
             "proposed_fix": "",
             "errors": "",
+            "validation_status": "",
             "iterations": 0,
             "is_resolved": False,
             "history": []
         }
 
         # 4. Stream Execution
+        if "stop_requested" not in st.session_state:
+            st.session_state.stop_requested = False
+
         trace_header = st.empty()
         trace_header.write("### 🧠 Agent Thought Trace")
+
+        def _request_stop():
+            st.session_state.stop_requested = True
+
         stop_container = st.empty()
-        stop_button_placeholder = stop_container.button("🛑 STOP Execution", key="stop_btn")
+        stop_container.button("🛑 STOP Execution", key="stop_btn", on_click=_request_stop)
         thought_container = st.empty()
         thought_log = ""
         
         final_state = initial_state
         
         for event in agent_graph.stream(initial_state):
-            # Check if stop button was pressed
-            if stop_button_placeholder:
+            # Check if stop was requested via callback
+            if st.session_state.get("stop_requested"):
+                st.session_state.stop_requested = False
                 st.warning("⚠️ Execution stopped by user.")
-                st.stop()
+                break
             
             for node_name, state_update in event.items():
                 new_logs = state_update.get("history", [])
@@ -142,9 +148,11 @@ if st.button("🚀 Start Resolution Process"):
         thought_container.empty()
 
         # Store in session state for persistence
-        # Compute is_resolved from evidence as fallback
+        # Compute is_resolved from evidence as fallback (respects tri-state validation)
+        vs = final_state.get("validation_status", "")
         if final_state.get("proposed_fix") and not final_state.get("errors"):
-            final_state["is_resolved"] = True
+            if vs in ("passed", "inconclusive", ""):
+                final_state["is_resolved"] = True
             
         # Debug: log final state keys for troubleshooting
         print(f"[DEBUG] Final state keys: {list(final_state.keys())}")
@@ -166,6 +174,7 @@ if "final_state" in st.session_state:
     # Debug section - visible in UI
     with st.expander("🔍 Debug: Final State Inspection"):
         st.write(f"**is_resolved:** `{final_state.get('is_resolved')}`")
+        st.write(f"**validation_status:** `{final_state.get('validation_status', 'N/A')}`")
         st.write(f"**proposed_fix (exists):** `{bool(final_state.get('proposed_fix'))}`")
         st.write(f"**errors:** `{repr(final_state.get('errors', 'KEY_MISSING'))}`")
         st.write(f"**iterations:** `{final_state.get('iterations')}`")

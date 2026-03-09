@@ -1,6 +1,6 @@
 [project]
 name = "multi-agent-issue-resolver"
-version = "0.1.0"
+version = "0.2.0"
 description = "Multi-Agent GitHub Issue Resolution System using LangGraph and Ollama"
 requires-python = ">=3.12"
 dependencies = [
@@ -12,4 +12,11 @@ dependencies = [
     "streamlit",
     "PyGithub",
     "GitPython",
+    "python-dotenv",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
 ]

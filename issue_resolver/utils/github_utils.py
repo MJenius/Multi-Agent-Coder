@@ -1,10 +1,12 @@
 import os
 import re
+import sys
+import stat
+import shutil
+import tempfile
 import git
 from github import Github, GithubException
 from typing import Tuple
-import shutil
-import stat
 from issue_resolver.tools.sandbox_tools import clean_sandbox
 
 def fetch_issue_details(repo_full_name: str, issue_number: int, token: str) -> Tuple[str, str]:
@@ -85,10 +87,14 @@ def submit_pull_request(
     # Initialize GitPython repo
     repo = git.Repo(repo_path)
 
-    # Create a new branch
+    # Create or reuse a branch (idempotent)
     branch_name = f"fix/issue-{issue_number}"
-    new_branch = repo.create_head(branch_name)
-    new_branch.checkout()
+    if branch_name in [h.name for h in repo.heads]:
+        print(f"[GitHub] Branch '{branch_name}' already exists -- checking out.")
+        repo.heads[branch_name].checkout()
+    else:
+        new_branch = repo.create_head(branch_name)
+        new_branch.checkout()
 
     # Apply the proposed fix via Docker sandbox
     import docker
@@ -143,16 +149,42 @@ def submit_pull_request(
     repo.git.add(A=True)
     repo.index.commit(f"Fix for issue #{issue_number}")
 
-    # Push — use the fork URL if we don't have direct push access
+    # Push -- use GIT_ASKPASS to avoid embedding PAT in .git/config
     origin = repo.remote(name='origin')
-    push_url = f"https://{token}@github.com/{push_repo_name}.git"
+    push_url = f"https://github.com/{push_repo_name}.git"
     origin.set_url(push_url)
 
-    # Force-push in case the branch already exists from a previous attempt
+    # Create a temporary GIT_ASKPASS helper that echoes the token
+    askpass_script = None
     try:
-        origin.push(branch_name)
-    except git.GitCommandError:
-        origin.push(branch_name, force=True)
+        if sys.platform == "win32":
+            askpass_script = tempfile.NamedTemporaryFile(
+                mode="w", suffix=".bat", delete=False, prefix="git_askpass_"
+            )
+            askpass_script.write(f"@echo {token}\n")
+            askpass_script.close()
+        else:
+            askpass_script = tempfile.NamedTemporaryFile(
+                mode="w", suffix=".sh", delete=False, prefix="git_askpass_"
+            )
+            askpass_script.write(f"#!/bin/sh\necho '{token}'\n")
+            askpass_script.close()
+            os.chmod(askpass_script.name, 0o700)
+
+        push_env = {
+            **os.environ,
+            "GIT_ASKPASS": askpass_script.name,
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+
+        # Force-push in case the branch already exists from a previous attempt
+        try:
+            repo.git.push("origin", branch_name, env=push_env)
+        except git.GitCommandError:
+            repo.git.push("origin", branch_name, force=True, env=push_env)
+    finally:
+        if askpass_script and os.path.exists(askpass_script.name):
+            os.remove(askpass_script.name)
 
     # Create PR on the UPSTREAM repo (cross-fork if needed)
     pr_head = f"{pr_head_prefix}{branch_name}"

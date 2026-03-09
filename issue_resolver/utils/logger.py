@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import datetime
 import json
+import re
 
 # Set up standard logging to print to console
 logging.basicConfig(
@@ -17,6 +18,23 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 sys_logger = logging.getLogger("issue_resolver")
+
+# ---------------------------------------------------------------------------
+# Secret redaction — prevents PATs from leaking into logs / state history
+# ---------------------------------------------------------------------------
+_SECRET_PATTERNS = [
+    re.compile(r'ghp_[A-Za-z0-9]{36,}'),           # GitHub PAT (classic)
+    re.compile(r'github_pat_[A-Za-z0-9_]{22,}'),    # GitHub PAT (fine-grained)
+    re.compile(r'gho_[A-Za-z0-9]{36,}'),             # GitHub OAuth token
+    re.compile(r'ghs_[A-Za-z0-9]{36,}'),             # GitHub App token
+]
+
+
+def _redact_secrets(text: str) -> str:
+    """Replace known secret patterns with a masked placeholder."""
+    for pat in _SECRET_PATTERNS:
+        text = pat.sub("****", text)
+    return text
 
 
 def append_to_history(node_name: str, action: str, content: str, max_length: int = 500) -> list[dict]:
@@ -30,6 +48,9 @@ def append_to_history(node_name: str, action: str, content: str, max_length: int
     on the `Annotated[list[dict], operator.add]` state field, returning
     a list allows it to append properly instead of overwriting.
     """
+    # 0. Redact secrets before any output
+    content = _redact_secrets(content)
+
     # 1. Console Log (Full Text)
     # We prefix multi-line content for better readability in the terminal
     if "\n" in content:

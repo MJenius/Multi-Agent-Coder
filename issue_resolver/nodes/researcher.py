@@ -25,6 +25,7 @@ from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, Tool
 
 from issue_resolver.state import AgentState
 from issue_resolver.utils.logger import append_to_history
+from issue_resolver.config import OLLAMA_BASE_URL, RESEARCHER_MODEL
 from issue_resolver.tools import (
     REPO_TOOLS, 
     list_files, 
@@ -39,9 +40,9 @@ from issue_resolver.tools import (
 # LLM setup -- tool-augmented model
 # ---------------------------------------------------------------------------
 _base_llm = ChatOllama(
-    model="llama3.2:latest",
+    model=RESEARCHER_MODEL,
     temperature=0,
-    base_url="http://localhost:11434",
+    base_url=OLLAMA_BASE_URL,
 )
 
 _llm = _base_llm.bind_tools(REPO_TOOLS)

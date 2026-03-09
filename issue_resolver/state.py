@@ -25,6 +25,7 @@ class AgentState(TypedDict):
     plan: str
     proposed_fix: str
     errors: str
+    validation_status: str  # "passed" | "failed" | "inconclusive"
     next_step: str
     iterations: int
     is_resolved: bool

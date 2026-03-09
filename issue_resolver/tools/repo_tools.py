@@ -18,6 +18,25 @@ from functools import wraps
 from pathlib import Path
 
 from langchain_core.tools import tool
+from issue_resolver.config import SANDBOX_WORKSPACE_DIR
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PATH CONFINEMENT -- Reject any path outside the allowed workspace
+# ─────────────────────────────────────────────────────────────────────────────
+_ALLOWED_ROOT = Path(SANDBOX_WORKSPACE_DIR).resolve()
+
+
+def _check_confinement(resolved_path: Path, label: str = "path") -> str | None:
+    """Return an error string if resolved_path is outside _ALLOWED_ROOT, else None."""
+    try:
+        resolved_path.relative_to(_ALLOWED_ROOT)
+        return None
+    except ValueError:
+        return (
+            f"Error: {label} '{resolved_path}' is outside the allowed workspace "
+            f"'{_ALLOWED_ROOT}'. Path traversal is not permitted."
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -138,6 +157,11 @@ def list_files(directory: str) -> str:
     """
     root = Path(directory).resolve()
     
+    # PATH CONFINEMENT: reject directories outside the sandbox
+    err = _check_confinement(root, "directory")
+    if err:
+        return err
+    
     # HARD GUARD: If it's a file, return an explicit error string to guide the LLM
     if root.is_file():
         return f"ERROR: '{directory}' is a FILE. You must use the 'read_file' tool to see its contents."
@@ -187,6 +211,11 @@ def search_code(query: str, directory: str) -> str:
     if not root.is_dir():
         return f"Error: '{directory}' is not a valid directory."
 
+    # PATH CONFINEMENT
+    err = _check_confinement(root, "directory")
+    if err:
+        return err
+
     supported_exts = {".py", ".cs", ".xaml", ".cpp", ".h", ".js", ".ts", ".jsx", ".tsx", ".go", ".java"}
     matches: list[str] = []
     
@@ -235,6 +264,12 @@ def read_file(file_path: str) -> str:
         if the file exceeds 500 lines.
     """
     fpath = Path(file_path).resolve()
+
+    # PATH CONFINEMENT
+    err = _check_confinement(fpath, "file_path")
+    if err:
+        return err
+
     if not fpath.is_file():
         return f"Error: '{file_path}' is not a valid file."
 
@@ -279,6 +314,11 @@ def generate_repo_map(directory: str, max_depth: int = 2) -> str:
     root = Path(directory).resolve()
     if not root.is_dir():
         return f"Error: '{directory}' is not a valid directory."
+
+    # PATH CONFINEMENT
+    err = _check_confinement(root, "directory")
+    if err:
+        return err
 
     # ✅ SAFETY: Convert max_depth to int if LLM passes it as string
     max_depth = int(max_depth) if isinstance(max_depth, str) else max_depth
@@ -379,6 +419,11 @@ def get_symbol_definition(symbol: str, directory: str) -> str:
     root = Path(directory).resolve()
     if not root.is_dir():
         return f"Error: '{directory}' is not a valid directory."
+
+    # PATH CONFINEMENT
+    err = _check_confinement(root, "directory")
+    if err:
+        return err
 
     # Generic patterns to find definitions for various languages
     pattern1 = re.compile(r'\b(?:class|def|function|interface|struct|enum)\s+' + re.escape(symbol) + r'\b')
