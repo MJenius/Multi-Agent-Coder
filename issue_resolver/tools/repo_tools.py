@@ -16,6 +16,45 @@ from pathlib import Path
 from langchain_core.tools import tool
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# UNIFIED IGNORE LIST FOR ALL REPO TOOLS
+# ─────────────────────────────────────────────────────────────────────────────
+# CRITICAL: Every tool (list_files, search_code, read_file, generate_repo_map,
+# get_symbol_definition) must use this exact set to prevent token drowning.
+#
+# Why each category matters:
+#   - .git, .gitignore: Version control metadata (irrelevant to code search)
+#   - bin, obj: C# build outputs with THOUSANDS of auto-generated .json/.cache/.props files
+#   - .vs, packages: Visual Studio artifacts and NuGet cache (critical for .NET repos)
+#   - __pycache__, .pytest_cache, .mypy_cache: Python bytecode and type-checking cache
+#   - node_modules: Thousands of npm dependencies (99% noise)
+#   - venv, .venv, env: Python virtual environments (duplicated dependencies)
+#   - build, dist, target: Common build output directories
+#   - .idea, .vscode, .github: IDE and GitHub workflow configs (not source code)
+#   - htmlcov, .tox, .coverage: Test/coverage artifacts
+#
+# WITHOUT THIS FILTERING:
+#   A single C# project's bin/ folder can contain 10,000+ files, causing:
+#   1. Massive tree output that floods the LLM context
+#   2. Token exhaustion on grep operations (30+ matches from .json metadata)
+#   3. False "0 results found" errors (agent gives up after context limit)
+#   4. 5+ minute hangs (tool processes thousands of non-source files)
+#
+IGNORE_DIRS = {
+    # Version control
+    ".git", ".gitignore", ".github",
+    # Python
+    ".venv", "venv", "env", "__pycache__", ".pytest_cache", ".mypy_cache", ".tox", ".coverage",
+    # Node.js
+    "node_modules", ".npm",
+    # C# / .NET (CRITICAL -- prevents bin/obj avalanche)
+    "bin", "obj", ".vs", "packages",
+    # General build outputs
+    "build", "dist", "target", "htmlcov",
+    # IDE configs (not source)
+    ".idea", ".vscode",
+}
+
 # ---------------------------------------------------------------------------
 # Tool 1 -- list_files
 # ---------------------------------------------------------------------------
@@ -46,9 +85,9 @@ def list_files(directory: str) -> str:
     code_files: list[str] = []
     
     for dirpath, _dirnames, filenames in os.walk(root):
-        # Skip hidden dirs and common build dirs
+        # ✅ UNIFIED FILTERING: All tools use the same IGNORE_DIRS constant
         parts = Path(dirpath).relative_to(root).parts
-        if any(p.startswith(".") or p in ("__pycache__", "node_modules", "bin", "obj", "build", "dist", "venv") for p in parts):
+        if any(p in IGNORE_DIRS or p.startswith(".") for p in parts):
             continue
             
         for fname in sorted(filenames):
@@ -87,8 +126,9 @@ def search_code(query: str, directory: str) -> str:
     matches: list[str] = []
     
     for dirpath, _dirnames, filenames in os.walk(root):
+        # ✅ UNIFIED FILTERING: Uses IGNORE_DIRS to prevent grep drowning
         parts = Path(dirpath).relative_to(root).parts
-        if any(p.startswith(".") or p in ("__pycache__", "node_modules", "bin", "obj", "build", "dist", "venv") for p in parts):
+        if any(p in IGNORE_DIRS or p.startswith(".") for p in parts):
             continue
             
         for fname in sorted(filenames):
@@ -152,12 +192,19 @@ def read_file(file_path: str) -> str:
 # Tool 4 -- generate_repo_map
 # ---------------------------------------------------------------------------
 @tool
-def generate_repo_map(directory: str) -> str:
+def generate_repo_map(directory: str, max_depth: int = 2) -> str:
     """Generates a high-level tree-view of the directory structure (ignoring common build/virtualenv folders)
     and includes the contents of README.md if present. This gives a Map of the codebase.
+    
+    The tree is bounded to avoid overwhelming the LLM with too much information.
+    By default, only shows 2 levels of depth (e.g., top-level folders and their immediate children).
+    
+    HARDCODED IGNORE LIST: Specifically excludes C# build artifacts (bin/, obj/) and other build noise
+    to prevent mapping thousands of useless compiled files.
 
     Args:
         directory: Root directory to map.
+        max_depth: Maximum depth to traverse (default 2). Use higher values for deeper exploration.
 
     Returns:
         A string containing the tree structure and README content (if any).
@@ -166,11 +213,16 @@ def generate_repo_map(directory: str) -> str:
     if not root.is_dir():
         return f"Error: '{directory}' is not a valid directory."
 
-    ignore_dirs = {".git", ".venv", "venv", "node_modules", "__pycache__", "bin", "obj", "build", "dist", ".idea", ".vscode"}
+    # ✅ UNIFIED FILTERING: Uses the module-level IGNORE_DIRS constant
+    # This ensures consistent behavior across ALL repo tools (list_files, search_code, etc.)
     
     tree_lines = []
     
-    def walk_tree(dir_path: Path, prefix: str = ""):
+    def walk_tree(dir_path: Path, prefix: str = "", current_depth: int = 0):
+        # Stop if we exceed max_depth
+        if current_depth > max_depth:
+            return
+            
         if len(tree_lines) > 200:
             return
             
@@ -179,11 +231,12 @@ def generate_repo_map(directory: str) -> str:
         except OSError:
             return
             
-        # Filter items
+        # Filter items: SKIP ignored directories and hidden folders
         dirs = []
         files = []
         for item in items:
-            if item in ignore_dirs or item.startswith("."):
+            # ✅ UNIFIED FILTER: Prevents recursing into bin/, obj/, .vs, packages, etc.
+            if item in IGNORE_DIRS or item.startswith("."):
                 continue
             p = dir_path / item
             if p.is_dir():
@@ -197,16 +250,18 @@ def generate_repo_map(directory: str) -> str:
             tree_lines.append(f"{prefix}{connector}{d}/")
             if len(tree_lines) >= 200: return
             extension = "    " if is_last else "│   "
-            walk_tree(dir_path / d, prefix + extension)
+            walk_tree(dir_path / d, prefix + extension, current_depth + 1)
             
-        for i, f in enumerate(files):
-            is_last = (i == len(files) - 1)
-            connector = "└── " if is_last else "├── "
-            tree_lines.append(f"{prefix}{connector}{f}")
-            if len(tree_lines) >= 200: return
+        # Only show files at max_depth level, not deeper
+        if current_depth < max_depth:
+            for i, f in enumerate(files):
+                is_last = (i == len(files) - 1)
+                connector = "└── " if is_last else "├── "
+                tree_lines.append(f"{prefix}{connector}{f}")
+                if len(tree_lines) >= 200: return
             
     tree_lines.append(str(root))
-    walk_tree(root)
+    walk_tree(root, "", current_depth=0)
     
     if len(tree_lines) >= 200:
         tree_lines.append("[TRUNCATED -- Repository map too large]")
@@ -226,7 +281,13 @@ def generate_repo_map(directory: str) -> str:
             except OSError:
                 continue
 
-    return f"Repository Map:\n{map_str}{readme_content}"
+    result = f"Repository Map:\n{map_str}{readme_content}"
+    
+    # ⚠️ OUTPUT VALIDATION: Warn if map is suspiciously large (possible filter bypass)
+    if len(tree_lines) >= 200:
+        print(f"[WARNING] generate_repo_map produced {len(tree_lines)} lines. Verify IGNORE_DIRS is filtering bin/obj/packages.")
+    
+    return result
 
 # ---------------------------------------------------------------------------
 # Tool 5 -- get_symbol_definition
@@ -257,8 +318,9 @@ def get_symbol_definition(symbol: str, directory: str) -> str:
     matches = []
     
     for dirpath, _dirnames, filenames in os.walk(root):
+        # ✅ UNIFIED FILTERING: Uses IGNORE_DIRS constant like all other tools
         parts = Path(dirpath).relative_to(root).parts
-        if any(p.startswith(".") or p in ("__pycache__", "node_modules", "bin", "obj", "build", "dist", "venv") for p in parts):
+        if any(p in IGNORE_DIRS or p.startswith(".") for p in parts):
             continue
             
         for fname in sorted(filenames):

@@ -71,6 +71,10 @@ if st.button("🚀 Start Resolution Process"):
                 st.success(f"Fetched Issue: {title}")
                 issue_content = f"Title: {title}\n\nBody: {body}"
                 issue_content += "\n\nCRITICAL INSTRUCTION: The repository code is located strictly inside the './sandbox_workspace' directory. Do not search the root directory '.'"
+                
+                # Add strategic hint for SOTA projects (like QRCoder)
+                if "qr" in body.lower() or "ascii" in body.lower():
+                    issue_content += "\n\n🎯 HINT: For QRCoder issues involving ASCII rendering, the bug is likely in QRCoder/AsciiQRCode.cs. Focus your search there."
             except Exception as e:
                 st.error(f"Error fetching issue: {e}")
                 st.stop()
@@ -110,12 +114,19 @@ if st.button("🚀 Start Resolution Process"):
         # 4. Stream Execution
         trace_header = st.empty()
         trace_header.write("### 🧠 Agent Thought Trace")
+        stop_container = st.empty()
+        stop_button_placeholder = stop_container.button("🛑 STOP Execution", key="stop_btn")
         thought_container = st.empty()
         thought_log = ""
         
         final_state = initial_state
         
         for event in agent_graph.stream(initial_state):
+            # Check if stop button was pressed
+            if stop_button_placeholder:
+                st.warning("⚠️ Execution stopped by user.")
+                st.stop()
+            
             for node_name, state_update in event.items():
                 new_logs = state_update.get("history", [])
                 if new_logs:
@@ -127,6 +138,7 @@ if st.button("🚀 Start Resolution Process"):
                 
         # Remove the trace window when execution finishes
         trace_header.empty()
+        stop_container.empty()
         thought_container.empty()
 
         # Store in session state for persistence

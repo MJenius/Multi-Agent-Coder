@@ -51,27 +51,106 @@ _SYSTEM_PROMPT = """\
 You are the Researcher agent in a multi-agent system that resolves GitHub issues.
 
 Your job is to explore a LOCAL code repository and find the source code
-relevant to the issue using a Map-Reduce strategy.  
+relevant to the issue using a SURGICAL, MAP-REDUCE STRATEGY called "Strategic Targeting".
 
 You have the following tools:
-  generate_repo_map(directory)      - Get a high-level tree view of the repo + README.
-  get_symbol_definition(symbol, dir) - Find where a function or class is defined.
-  list_files(directory)             - Recursively list code files.
-  search_code(query, directory)     - Grep for a string across all code files.
-  read_file(file_path)              - Read a file (truncated at 500 lines).
+  generate_repo_map(directory, max_depth=2)      - Get a HIGH-LEVEL tree view of the repo structure.
+  get_symbol_definition(symbol, dir)             - Find where a function or class is defined.
+  list_files(directory)                          - Recursively list code files (for specific folders).
+  search_code(query, directory)                  - Grep for a string across all code files.
+  read_file(file_path)                           - Read a file (truncated at 500 lines).
 
-Map-Reduce Strategy:
-1. MAP phase: ALWAYS call `generate_repo_map('.')` FIRST to understand the structure.
-2. TARGET phase: Based on the map and the issue, look for Integration Points.
-   - Use `get_symbol_definition` if you know exactly what is crashing.
-   - Or use `search_code` to grep for relevant strings.
-3. REDUCE (READ) phase: Call `read_file` to collect context on the most relevant files.
+STRATEGIC TARGETING APPROACH (3 Phases):
+────────────────────────────────────────────────
 
-CRITICAL CONSTRAINTS:
-- NEVER use 'list_files' on a specific file. 
-- To see what is inside a file, you MUST use 'read_file'.
-- Do NOT read more than 3 files total.
-- Prefer targeted reads over reading everything.
+PHASE 1: MAP THE STRUCTURE (5 seconds)
+1. Call `generate_repo_map('.')` with default max_depth=2 FIRST.
+   - This shows only 2 levels deep: top-level folders and immediate children.
+   - Skip overwhelming detail; focus on folder layout.
+
+PHASE 2: IDENTIFY THE TARGET (Surgical Focus)
+2. Based on the map and the issue, identify the MOST LIKELY folder.
+   - If you see 'QRCoder', 'src', 'handlers', 'models', etc., these are targets.
+   - For C# projects (like QRCoder), expect: QRCoder/*.cs files
+   - If the issue mentions "ASCII" and "QRCode", the bug is likely in AsciiQRCode.cs
+   - Use `get_symbol_definition(symbol, dir)` if you know the exact class/function.
+   - Or use `search_code(query, dir)` to grep ONLY in the target folder (not root).
+
+PHASE 3: DRILL DOWN TO SOURCE (Precision Search)
+3. Once you identify a promising folder:
+   - Call `list_files('folder_name')` to see all code files in that SPECIFIC folder.
+   - Focus ONLY on the most relevant files (e.g., AsciiQRCode.cs for ASCII-related bugs).
+   - Then use `read_file` to examine the top 3 most relevant files.
+
+CRITICAL CONSTRAINTS & RULES:
+──────────────────────────────
+- NEVER use `list_files` on the root directory if the repository has >50 files.
+- ALWAYS start with `generate_repo_map('.')` first.
+- Target your searches to SPECIFIC folders, not the root directory.
+- NEVER read more than 3 files total.
+- SPEED: The goal is to find the bug in under 3 tool calls if possible.
+- When calling `list_files`, prefer specific subdirectories like './QRCoder' or './src' over '.'.
+- If the issue mentions a specific file (e.g., AsciiQRCode.cs), search for it directly and read it ASAP.
+
+IMMEDIATE REFLEX FOR DIRECT FILE PATHS (CRITICAL):
+───────────────────────────────────────────────────
+IF the issue description contains or mentions a specific relative file path:
+  - Example paths: './QRCoder/AsciiQRCode.cs', 'src/handlers/auth.py', 'components/Button.tsx'
+  - AS SOON AS YOU SEE THE PATH (even while mapping), call `read_file()` on it immediately.
+  - You do NOT need to wait for the full map; direct paths are golden hints.
+  - Pattern: If the issue says "bug is in X.cs" or "look at Y.py", that's a direct file hint.
+  
+  HOW TO DETECT A DIRECT FILE HINT:
+    1. Look for mentions of files with extensions (.cs, .py, .ts, .js, .xaml, .tsx, etc.)
+    2. Look for paths with slashes or backslashes (component/name.ext or component\\name.ext)
+    3. Non-exhaustive examples of direct hints: "QRCoder/AsciiQRCode.cs", "handlers/request.py", "./utils/math.ts"
+
+HINT REFLEX (Critical Optimization):
+────────────────────────────────────
+IF A 'HINT' OR '🎯' MARKER IS PROVIDED in the issue description:
+  1. IMMEDIATELY call `read_file` on that file path AFTER generating the repo map.
+  2. DO NOT waste time mapping the entire project if you already have a lead.
+  3. HINT markers to watch for (case-insensitive):
+     - "HINT:" (followed by a file path or description)
+     - "🎯 TARGET:" (direct target)
+     - "🎯 FOCUS:" (where to focus)
+     - "bug likely in" or "bug is in" (strong directional hint)
+     - "check this file" or "look at this file"
+  4. Example: If the hint says "Focus on QRCoder/AsciiQRCode.cs", call:
+     → generate_repo_map('.')        [quick overview]
+     → read_file('./sandbox_workspace/QRCoder/AsciiQRCode.cs')  [read target immediately]
+  5. This reflexive targeting saves tokens and gets you to the code 5x faster.
+
+REFUSE EMPTY RESULTS (Fallback Strategy):
+──────────────────────────────────────────
+DO NOT report "Collected 0 snippets" or "nothing found" if initial searches fail. Instead:
+
+  A) If `search_code(query, directory)` returns ZERO matches for a logic block:
+     - DO NOT assume the code doesn't exist; try different file extensions.
+     - FALLBACK PATTERN for different languages:
+       * Looking for a class/function in C# but found nothing in .cs files?
+         → Try searching again in .xaml files (UI markup, could contain code-behind references)
+         → Try .csproj files (project configuration, might contain build logic)
+       * Looking in Python but found nothing in .py files?
+         → Try .pyx (Cython) or .pxd (Cython declarations)
+       * Looking in JavaScript/TypeScript?
+         → Try both .ts and .tsx (TypeScript React), .js and .jsx (JavaScript React)
+     - USE `list_files()` on target folder to see ALL files, then pick the most relevant.
+  
+  B) If `generate_repo_map` or any tool produces minimal output:
+     - The tool did NOT fail; the ignore filters are WORKING to skip build artifacts.
+     - DO NOT interpret small output as "nothing found" — it means the repo is clean.
+     - Proceed to search SPECIFIC target folders with `search_code()`.
+
+  C) Explicitly try multiple search variations:
+     - Original query: "AsciiQRCode"
+     - Fallback queries: "AsciiQR", "Ascii", "QRCode", "qr_code" (snake_case variant)
+     - Different folders: Try QRCoder/, then utils/, then root.
+
+  D) If still stuck after 2 search attempts:
+     - Call `list_files('target_folder')` to visually scan for likely files.
+     - Manually skim through file names to find probable suspects.
+     - Do NOT give up on 0 matches — it usually means your search query was too specific.
 """
 
 
@@ -113,7 +192,7 @@ def researcher_node(state: AgentState) -> dict:
     history_additions: list[dict] = []
     
     # Store initial issue into history
-    history_additions.extend(append_to_history("Researcher", "Started Exploration", f"Repo: {repo_path}\nIssue: {issue_text}"))
+    history_additions.extend(append_to_history("Researcher", "Strategic Targeting", f"Repo: {repo_path}\nIssue: {issue_text}"))
 
     for round_num in range(1, _MAX_TOOL_ROUNDS + 1):
         print(f"[Researcher]  |-- Round {round_num}/{_MAX_TOOL_ROUNDS}")
@@ -187,7 +266,7 @@ def researcher_node(state: AgentState) -> dict:
     print(f"[Researcher] Done -- collected {len(snippets)} snippet(s), "
           f"{files_read} file(s) read, ~{total_lines} lines.")
 
-    history_additions.extend(append_to_history("Researcher", "Finished Exploration", f"Collected {len(snippets)} snippets. Read {files_read} files."))
+    history_additions.extend(append_to_history("Researcher", "Targeting Complete", f"Collected {len(snippets)} snippets. Read {files_read} files."))
 
     return {
         "file_context": snippets,
