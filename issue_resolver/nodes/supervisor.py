@@ -86,7 +86,7 @@ def supervisor_node(state: AgentState) -> dict:
         try:
             summary_response = _llm.invoke([HumanMessage(content=summary_prompt)])
             failure_summary = summary_response.content.strip()
-        except:
+        except Exception:
             failure_summary = f"System failed after 5 iterations. Persistent errors: {errors}"
             
         history_addition = append_to_history("Supervisor", "Failure Summary", failure_summary)

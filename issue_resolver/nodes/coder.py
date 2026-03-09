@@ -146,10 +146,10 @@ def _find_and_replace(original: str, search: str, replace: str) -> str | None:
     orig_lines = original.split("\n")
     search_lines = search.strip().split("\n")
     n = len(search_lines)
-    search_stripped = [l.strip() for l in search_lines]
+    search_stripped = [line.strip() for line in search_lines]
 
     for i in range(len(orig_lines) - n + 1):
-        if [l.strip() for l in orig_lines[i:i + n]] == search_stripped:
+        if [line.strip() for line in orig_lines[i:i + n]] == search_stripped:
             replace_lines = replace.strip().split("\n")
             return "\n".join(orig_lines[:i] + replace_lines + orig_lines[i + n:])
 

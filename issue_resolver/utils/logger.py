@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import logging
 import datetime
-import json
 import re
 
 # Set up standard logging to print to console

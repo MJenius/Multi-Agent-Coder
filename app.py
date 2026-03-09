@@ -2,7 +2,6 @@ import streamlit as st
 import os
 import shutil
 import git
-import json
 from issue_resolver.graph import app as agent_graph
 from issue_resolver.utils.github_utils import fetch_issue_details, submit_pull_request
 from issue_resolver.config import SANDBOX_WORKSPACE_DIR

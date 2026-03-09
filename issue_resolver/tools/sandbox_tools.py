@@ -240,7 +240,7 @@ def run_tests_in_sandbox(diff: str) -> tuple[bool, str]:
             print(f"[Sandbox] Found test project: {test_proj}")
             
             # Build the test project
-            print(f"[Sandbox] Building test project...")
+            print("[Sandbox] Building test project...")
             build_res = sandbox.exec_run(["dotnet", "build", test_proj], workdir="/workspace")
             build_out = build_res.output.decode("utf-8", errors="ignore")
             
@@ -251,7 +251,7 @@ def run_tests_in_sandbox(diff: str) -> tuple[bool, str]:
                     return True, "Build skipped (platform-specific dependencies, but patch is syntactically valid)"
                 # Try with --no-restore for offline containers
                 if "NU1301" in build_out or "Unable to load the service index" in build_out:
-                    print(f"[Sandbox] NuGet restore failed (offline), retrying with --no-restore...")
+                    print("[Sandbox] NuGet restore failed (offline), retrying with --no-restore...")
                     build_res = sandbox.exec_run(
                         ["dotnet", "build", test_proj, "--no-restore"],
                         workdir="/workspace"
@@ -300,7 +300,7 @@ def run_tests_in_sandbox(diff: str) -> tuple[bool, str]:
                     print("[Sandbox] Build skipped (platform-specific Windows dependencies)")
                     return True, "Build skipped (patch is syntactically valid, platform skip)"
                 if "NU1301" in build_out or "Unable to load the service index" in build_out:
-                    print(f"[Sandbox] NuGet restore failed (offline), retrying with --no-restore...")
+                    print("[Sandbox] NuGet restore failed (offline), retrying with --no-restore...")
                     build_res = sandbox.exec_run(
                         ["dotnet", "build", lib_proj, "--no-restore"],
                         workdir="/workspace"
@@ -376,7 +376,7 @@ def run_tests_in_sandbox(diff: str) -> tuple[bool, str]:
     for fpath in modified_files:
         if fpath.endswith(".py"):
             mod = fpath[:-3].replace("/", ".").replace("\\", ".")
-            script_lines.append(f"try:\n    importlib.import_module('{mod}')\n    print(f'Successfully imported: {mod}')\nexcept Exception as e:\n    print(f'Failed to import {mod}: {e}')\n    sys.exit(1)")
+            script_lines.append(f"try:\n    importlib.import_module('{mod}')\n    print(f'Successfully imported: {mod}')\nexcept Exception as ex:\n    print(f'Failed to import {mod}: {{ex}}')\n    sys.exit(1)")
     script_lines.append("print('All import smoke-tests passed.')")
     test_script = "\n".join(script_lines)
 

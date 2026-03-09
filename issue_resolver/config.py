@@ -9,7 +9,6 @@ the project root to override any setting.
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
 # Load .env file if python-dotenv is installed (optional dependency)
 try:

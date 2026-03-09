@@ -12,7 +12,6 @@ via .bind_tools().  All tools include RAM-safety guards:
 from __future__ import annotations
 
 import os
-import time
 import threading
 from functools import wraps
 from pathlib import Path
@@ -282,7 +281,7 @@ def read_file(file_path: str) -> str:
     output_lines = lines[:500]
 
     # Prepend line numbers for easy reference
-    numbered = [f"{i}: {l}" for i, l in enumerate(output_lines, start=1)]
+    numbered = [f"{i}: {line}" for i, line in enumerate(output_lines, start=1)]
     if truncated:
         numbered.append(f"[TRUNCATED at 500 / {len(lines)} lines]")
 
@@ -358,7 +357,8 @@ def generate_repo_map(directory: str, max_depth: int = 2) -> str:
             is_last = (i == len(dirs) - 1) and (len(files) == 0)
             connector = "└── " if is_last else "├── "
             tree_lines.append(f"{prefix}{connector}{d}/")
-            if len(tree_lines) >= 200: return
+            if len(tree_lines) >= 200:
+                return
             extension = "    " if is_last else "│   "
             walk_tree(dir_path / d, prefix + extension, current_depth + 1)
             
@@ -368,7 +368,8 @@ def generate_repo_map(directory: str, max_depth: int = 2) -> str:
                 is_last = (i == len(files) - 1)
                 connector = "└── " if is_last else "├── "
                 tree_lines.append(f"{prefix}{connector}{f}")
-                if len(tree_lines) >= 200: return
+                if len(tree_lines) >= 200:
+                    return
             
     tree_lines.append(str(root))
     walk_tree(root, "", current_depth=0)

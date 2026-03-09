@@ -21,7 +21,7 @@ import re
 from pathlib import Path
 
 from langchain_ollama import ChatOllama
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
+from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
 
 from issue_resolver.state import AgentState
 from issue_resolver.utils.logger import append_to_history
@@ -239,7 +239,7 @@ def _try_search_variations(
     for attempt, query in enumerate(queries[:max_attempts], 1):
         try:
             result = search_code.invoke({"query": query, "directory": directory})
-            match_count = len([l for l in result.split('\n') if l.strip() and ':' in l and not l.startswith('[')])
+            match_count = len([line for line in result.split('\n') if line.strip() and ':' in line and not line.startswith('[')])
             
             if match_count > 0:
                 print(f"[Researcher] ✅ Found {match_count} match(es) for '{query}' (attempt {attempt})")
@@ -300,7 +300,7 @@ def researcher_node(state: AgentState) -> dict:
         print(f"[Researcher] Reading {len(hint_files)} hint file(s)...")
         for idx, hint_file in enumerate(hint_files[:_MAX_FILES_READ], 1):
             if files_read >= _MAX_FILES_READ:
-                print(f"[Researcher] Reached max file limit; skipping remaining hints.")
+                print("[Researcher] Reached max file limit; skipping remaining hints.")
                 break
             
             # Normalize path: strip leading repo path if hint includes it
