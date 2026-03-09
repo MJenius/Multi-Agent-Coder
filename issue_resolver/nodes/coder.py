@@ -1,219 +1,283 @@
 """
-Coder Node -- Phase 3: LLM-driven Unified Diff generation.
+Coder Node -- Generates code fixes using search-and-replace.
 
-Uses qwen2.5-coder:7b via ChatOllama to produce a surgical Unified Diff
-that resolves the GitHub issue based on the file_context gathered by
-the Researcher.
+Uses qwen2.5-coder:7b via ChatOllama.  The LLM identifies buggy lines and provides
+a corrected version.  A unified diff is then generated programmatically
+using Python's difflib -- far more reliable than asking small LLMs to
+produce raw unified diffs directly.
 """
 
 from __future__ import annotations
 
+import difflib
 import re
 
 from langchain_ollama import ChatOllama
-from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
-from langchain_core.tools import tool
+from langchain_core.messages import SystemMessage, HumanMessage
 
 from issue_resolver.state import AgentState
 from issue_resolver.utils.logger import append_to_history
-from issue_resolver.tools.sandbox_tools import apply_diff_in_sandbox, clean_sandbox, get_sandbox_container
 
 # ---------------------------------------------------------------------------
-# LLM setup
+# LLM
 # ---------------------------------------------------------------------------
-_base_llm = ChatOllama(
+_llm = ChatOllama(
     model="qwen2.5-coder:7b",
     temperature=0,
     base_url="http://localhost:11434",
+    num_predict=1024,
 )
 
-@tool
-def lint_code(diff: str) -> str:
-    """Applies your provisional diff to the sandbox, checks for syntax errors, and then reverts the sandbox.
-    Use this to verify your code compiles before submitting the final diff.
-    """
-    sandbox = get_sandbox_container()
-    if not sandbox:
-        return "Error: sandbox container down."
-    
-    res = apply_diff_in_sandbox(diff, ".")
-    if "Error" in res:
-        clean_sandbox()
-        return res
-        
-    check_csproj = sandbox.exec_run(["bash", "-c", "find . -name '*.csproj' | head -1"], workdir="/workspace")
-    check_pkg = sandbox.exec_run(["test", "-f", "package.json"], workdir="/workspace")
-    
-    if check_csproj.output.strip():
-        chk = sandbox.exec_run(["dotnet", "build"], workdir="/workspace")
-    elif check_pkg.exit_code == 0:
-        chk = sandbox.exec_run(["bash", "-c", "find . -name '*.js' -exec node -c {} +"], workdir="/workspace")
-    else:
-        chk = sandbox.exec_run(["bash", "-c", "python -m compileall ."], workdir="/workspace")
-        
-    output = chk.output.decode("utf-8", errors="ignore")
-    clean_sandbox()
-    
-    if chk.exit_code == 0:
-        return "Syntax OK! No compilation errors."
-    return f"Syntax Errors Found:\n{output}"
-
-_llm = _base_llm.bind_tools([lint_code])
-_MAX_CODER_ROUNDS = 3
-
 _SYSTEM_PROMPT = """\
-You are a Senior Software Engineer. Your task is to resolve a GitHub issue by 
-providing a functional fix in the form of a UNIFIED DIFF.
+You are a Senior Software Engineer. Fix the bug described in the GitHub issue.
 
-CRITICAL RULES:
-1. PLAN FIRST: You MUST output a <plan>...</plan> block outlining the steps you will take to fix the issue.
-2. VERIFY: You can use the `lint_code` tool to check your initial diff for syntax/compilation errors. 
-   If there are errors, fix them before proceeding.
-3. BE SURGICAL: Only modify the lines necessary to fix the reported bug.
-4. REPLACE: Your diff MUST have a `-` (remove) line AND a `+` (add) line that changes the actual code logic.
-5. NO-OP FORBIDDEN: A diff that only changes whitespace, blank lines, or docstrings is WRONG and will be REJECTED.
-6. FORMAT: Output ONLY the final diff inside a ```diff ... ``` markdown block.
+You MUST use this EXACT output format:
 
-DIFF FORMAT RULES:
-- MUST include file headers: `--- a/file_path` and `+++ b/file_path` before the hunks.
-- MUST NOT include the line numbers (e.g., `1: `, `14: `) from the context in your generated diff. Remove `<line_number>: ` prefixes!
-- Keep hunks SMALL: include only 1-2 context lines before and after the change.
-- The @@ header line counts MUST match the body.
-- Context lines start with a SPACE character.
-- Removed lines start with `-`.
-- Added lines start with `+`.
-- Every hunk MUST be COMPLETE. Do NOT truncate or omit lines.
+<plan>1-2 sentence fix description</plan>
+
+<fix>
+FILE: path/to/file.ext
+SEARCH:
+(exact lines from source that need changing)
+REPLACE:
+(corrected lines)
+</fix>
+
+EXAMPLE:
+<plan>Swap the inverted default constants so BLACK maps to filled and WHITE maps to space.</plan>
+
+<fix>
+FILE: QRCoder/AsciiQRCode.cs
+SEARCH:
+            WHITE_ALL = "\\u2588",
+            WHITE_BLACK = "\\u2580",
+            BLACK_WHITE = "\\u2584",
+            BLACK_ALL = " ",
+REPLACE:
+            WHITE_ALL = " ",
+            WHITE_BLACK = "\\u2584",
+            BLACK_WHITE = "\\u2580",
+            BLACK_ALL = "\\u2588",
+</fix>
+
+RULES:
+1. Copy EXACT lines from the source code into SEARCH (including indentation).
+2. Keep changes SURGICAL -- only the minimum lines needed.
+3. Do NOT rewrite whole functions or add/remove methods.
+4. Output ONLY the <plan> and <fix> blocks. Nothing else.
 """
 
 
 # ---------------------------------------------------------------------------
-# Helper: extract diff from markdown fenced block
+# Helpers
 # ---------------------------------------------------------------------------
-def _extract_diff(llm_output: str) -> str:
-    """Return the content between ```diff and ``` markers."""
-    # Start marker
-    start_marker = "```diff"
-    start_pos = llm_output.find(start_marker)
-    
-    if start_pos == -1:
-        # Fallback: maybe they just did ``` without diff?
-        start_marker = "```"
-        start_pos = llm_output.find(start_marker)
+def _strip_line_numbers(text: str) -> str:
+    """Remove line-number prefixes added by the read_file tool."""
+    out = []
+    for line in text.split("\n"):
+        m = re.match(r"^\d+: (.*)$", line)
+        out.append(m.group(1) if m else line)
+    return "\n".join(out)
 
-    if start_pos != -1:
-        content_start = start_pos + len(start_marker)
-        # Look for end marker
-        end_pos = llm_output.find("```", content_start)
-        if end_pos != -1:
-            return llm_output[content_start:end_pos].strip()
-        else:
-            # Not closed? Take the rest of the output
-            return llm_output[content_start:].strip()
 
-    # No markers found -- return raw output (best effort)
-    # But only if it looks like a diff (simple check)
-    if "---" in llm_output and "+++" in llm_output:
-        return llm_output.strip()
-    
+def _extract_file_info(file_context: list[str]) -> dict[str, str]:
+    """Parse context snippets into {filepath: original_content}."""
+    files: dict[str, str] = {}
+    for snippet in file_context:
+        m = re.search(r"# --- (?:\[HINTED\] )?file: (.+?) ---\n?", snippet)
+        if m:
+            path = m.group(1).lstrip("./")
+            raw = snippet[m.end():]
+            content = _strip_line_numbers(raw)
+            content = re.sub(r"\n?\[TRUNCATED[^\]]*\]\s*$", "", content)
+            files[path] = content
+    return files
+
+
+def _extract_plan(text: str) -> str:
+    s, e = text.find("<plan>"), text.find("</plan>")
+    return text[s + 6:e].strip() if s != -1 and e != -1 else ""
+
+
+def _parse_fix(text: str) -> tuple[str, str, str]:
+    """Extract FILE / SEARCH / REPLACE from LLM output."""
+    fix_m = re.search(r"<fix>(.*?)</fix>", text, re.DOTALL)
+    block = fix_m.group(1) if fix_m else text
+
+    file_m = re.search(r"FILE:\s*(.+)", block)
+    if not file_m:
+        return "", "", ""
+
+    search_m = re.search(r"SEARCH:\n(.*?)REPLACE:\n", block, re.DOTALL)
+    if not search_m:
+        return file_m.group(1).strip(), "", ""
+
+    replace_pos = block.find("REPLACE:\n") + len("REPLACE:\n")
+    replace_text = block[replace_pos:].rstrip()
+
+    return file_m.group(1).strip(), search_m.group(1).rstrip("\n"), replace_text
+
+
+def _match_path(target: str, known: list[str]) -> str:
+    """Fuzzy-match an LLM file path to a known context path."""
+    t = target.lstrip("./").replace("sandbox_workspace/", "")
+    if t in known:
+        return t
+    base = t.rsplit("/", 1)[-1] if "/" in t else t
+    for k in known:
+        if k.endswith("/" + base) or k == base:
+            return k
+    return t
+
+
+def _find_and_replace(original: str, search: str, replace: str) -> str | None:
+    """Find SEARCH in original, substitute with REPLACE.  Returns None on failure."""
+    # Level 1: exact substring match
+    if search in original:
+        return original.replace(search, replace, 1)
+
+    # Level 2: strip outer whitespace
+    ss = search.strip()
+    if ss and ss in original:
+        return original.replace(ss, replace.strip(), 1)
+
+    # Level 3: per-line whitespace normalization
+    orig_lines = original.split("\n")
+    search_lines = search.strip().split("\n")
+    n = len(search_lines)
+    search_stripped = [l.strip() for l in search_lines]
+
+    for i in range(len(orig_lines) - n + 1):
+        if [l.strip() for l in orig_lines[i:i + n]] == search_stripped:
+            replace_lines = replace.strip().split("\n")
+            return "\n".join(orig_lines[:i] + replace_lines + orig_lines[i + n:])
+
+    return None
+
+
+def _make_diff(original: str, modified: str, path: str) -> str:
+    """Produce a unified diff."""
+    a = original.splitlines(keepends=True)
+    b = modified.splitlines(keepends=True)
+    if a and not a[-1].endswith("\n"):
+        a[-1] += "\n"
+    if b and not b[-1].endswith("\n"):
+        b[-1] += "\n"
+    return "".join(difflib.unified_diff(a, b, f"a/{path}", f"b/{path}"))
+
+
+def _extract_diff_fallback(text: str) -> str:
+    """Pull a unified diff from a fenced code block (last resort)."""
+    for marker in ("```diff", "```\n---"):
+        pos = text.find(marker)
+        if pos != -1:
+            start = text.find("\n", pos) + 1
+            end = text.find("```", start)
+            return (text[start:end] if end != -1 else text[start:]).strip()
     return ""
 
-def _extract_plan(llm_output: str) -> str:
-    """Extracts the <plan> block from the output."""
-    start = llm_output.find("<plan>")
-    end = llm_output.find("</plan>")
-    if start != -1 and end != -1:
-        return llm_output[start+6:end].strip()
-    return ""
-
 
 # ---------------------------------------------------------------------------
-# Node implementation
+# Node
 # ---------------------------------------------------------------------------
 def coder_node(state: AgentState) -> dict:
-    """Generate a Unified Diff that fixes the issue."""
-    print("[Coder] Agent Coder is thinking...")
+    """Generate a code fix via search-and-replace, then produce a unified diff."""
+    print("[Coder] Generating code fix...")
 
-    issue_text = state.get("issue", "(no issue provided)")
+    issue_text = state.get("issue", "(no issue)")
     file_context = state.get("file_context", [])
     errors = state.get("errors", "")
 
-    # -- Build the human message with all available context ----------------
-    parts: list[str] = [f"## GitHub Issue\n{issue_text}"]
+    file_info = _extract_file_info(file_context)
+    known_paths = list(file_info.keys())
+    print(f"[Coder] Context files: {known_paths}")
 
-    if file_context:
-        joined = "\n\n".join(file_context)
-        parts.append(f"## Relevant Source Code\n{joined}")
+    # Build clean context (line numbers stripped for less noise)
+    ctx_parts = []
+    for p, c in file_info.items():
+        lines = c.split("\n")
+        if len(lines) > 300:
+            c = "\n".join(lines[:300]) + "\n[TRUNCATED]"
+        ctx_parts.append(f"# === FILE: {p} ===\n{c}")
+    ctx = "\n\n".join(ctx_parts) or "(no source code available)"
 
+    parts = [f"## GitHub Issue\n{issue_text}", f"## Source Code\n{ctx}"]
     if errors:
-        parts.append(
-            f"## Previous Errors (use as feedback to improve your diff)\n{errors}"
-        )
-
-    parts.append(
-        "First generate a <plan>, optionally use `lint_code` to verify your diff, "
-        "and finally produce the Unified Diff inside a ```diff``` code block."
-    )
-
-    human_content = "\n\n".join(parts)
+        parts.append(f"## Previous Errors (your last fix failed)\n{errors}")
+    parts.append("Provide your fix using the FILE/SEARCH/REPLACE format.")
 
     messages = [
         SystemMessage(content=_SYSTEM_PROMPT),
-        HumanMessage(content=human_content),
+        HumanMessage(content="\n\n".join(parts)),
     ]
+    history: list[dict] = []
 
-    history_additions: list[dict] = []
-    final_diff = ""
-    final_plan = ""
+    print("[Coder] Calling LLM...")
+    try:
+        resp = _llm.invoke(messages)
+    except Exception as exc:
+        print(f"[Coder] [ERROR] LLM failed: {exc}")
+        history.extend(append_to_history("Coder", "Error", str(exc)))
+        return {"proposed_fix": "", "history": history}
 
-    for round_num in range(1, _MAX_CODER_ROUNDS + 1):
-        print(f"[Coder]  |-- Round {round_num}/{_MAX_CODER_ROUNDS}")
-        try:
-            response = _llm.invoke(messages)
-        except Exception as exc:
-            print(f"[Coder] [ERROR] LLM call failed: {exc}")
-            history_additions.extend(append_to_history("Coder", "Error", str(exc)))
-            break
+    raw = getattr(resp, "content", "") or ""
+    if not raw:
+        print("[Coder] [ERROR] Empty LLM response")
+        history.extend(append_to_history("Coder", "Error", "Empty LLM response"))
+        return {"proposed_fix": "", "history": history}
 
-        messages.append(response)
-        
-        raw_output = response.content
-        if raw_output:
-            history_additions.extend(append_to_history("Coder", "Generation", raw_output, max_length=600))
-            
-            ext_plan = _extract_plan(raw_output)
-            if ext_plan:
-                final_plan = ext_plan
-            ext_diff = _extract_diff(raw_output)
-            if ext_diff:
-                final_diff = ext_diff
+    print(f"[Coder] LLM returned {len(raw)} chars")
+    history.extend(append_to_history("Coder", "Generation", raw, max_length=800))
 
-        tool_calls = getattr(response, "tool_calls", None) or []
-        if not tool_calls:
-            print("[Coder] No more tool calls -- generating final diff.")
-            break
-            
-        for tc in tool_calls:
-            if tc["name"] == "lint_code":
-                print("[Coder]    --> lint_code(...)")
-                diff_arg = tc["args"].get("diff", "")
-                
-                log_payload = f"Tool: lint_code\nDiff Length: {len(diff_arg)}"
-                history_additions.extend(append_to_history("Coder", "Tool Call", log_payload, max_length=150))
-                
-                res = lint_code.invoke({"diff": diff_arg})
-                messages.append(ToolMessage(content=str(res), tool_call_id=tc["id"]))
+    plan = _extract_plan(raw)
+    if plan:
+        print(f"[Coder] Plan: {plan}")
 
-    if final_diff:
-        if "---" in final_diff and "+++" in final_diff:
-            print("[Coder] [OK] Valid Unified Diff extracted.")
+    # --- Primary: search-and-replace -> programmatic diff ---
+    diff = ""
+    fpath, search, replace = _parse_fix(raw)
+
+    if fpath and search and replace:
+        matched = _match_path(fpath, known_paths)
+        print(f"[Coder] Fix target: {fpath} -> {matched}")
+
+        if matched in file_info:
+            original = file_info[matched]
+            modified = _find_and_replace(original, search, replace)
+            if modified and modified != original:
+                diff = _make_diff(original, modified, matched)
+                print(f"[Coder] [OK] Generated diff ({len(diff)} chars)")
+            elif modified == original:
+                print("[Coder] [WARN] Fix is a no-op (SEARCH == REPLACE)")
+            else:
+                print("[Coder] [WARN] SEARCH block not found in source file")
         else:
-            print("[Coder] [WARN] Extracted text may not be a valid diff.")
+            print(f"[Coder] [WARN] File '{matched}' not in context. Known: {known_paths}")
     else:
-        print("[Coder] [WARN] No diff content could be extracted.")
+        missing = []
+        if not fpath:
+            missing.append("FILE")
+        if not search:
+            missing.append("SEARCH")
+        if not replace:
+            missing.append("REPLACE")
+        print(f"[Coder] [WARN] Could not parse fix format (missing: {', '.join(missing)})")
 
-    print(f"[Coder] Proposed fix length: {len(final_diff)} chars.")
-    return {
-        "plan": final_plan,
-        "proposed_fix": final_diff,
-        "history": history_additions
-    }
+    # --- Fallback: extract raw unified diff from fenced block ---
+    if not diff:
+        print("[Coder] Trying fallback: raw diff extraction")
+        fb = _extract_diff_fallback(raw)
+        if fb and "---" in fb and "+++" in fb:
+            lines = fb.split("\n")
+            for i, line in enumerate(lines):
+                if line.startswith("--- a/") or line.startswith("+++ b/"):
+                    lines[i] = line[:6] + _match_path(line[6:], known_paths)
+            diff = "\n".join(lines)
+            print(f"[Coder] [OK] Fallback diff ({len(diff)} chars)")
+        else:
+            print("[Coder] [ERROR] No usable fix in LLM output")
+
+    if diff:
+        print(f"[Coder] Final diff preview:\n{diff[:400]}")
+
+    return {"plan": plan, "proposed_fix": diff, "history": history}

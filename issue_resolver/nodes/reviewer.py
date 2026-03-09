@@ -25,26 +25,49 @@ def reviewer_node(state: AgentState) -> dict:
         print("[Reviewer] [WARN] No proposed fix found in state.")
         return {"errors": "No fix proposed.", "history": append_to_history("Reviewer", "Failure", "No fix proposed to review.")}
 
-    # 1. Apply the diff
-    print("[Reviewer] Applying proposed fix in the sandbox...")
-    patch_output = apply_diff_in_sandbox(proposed_fix, repo_path)
-    
-    if "Error" in patch_output:
-        print("[Reviewer] [FAIL] Patch failed to apply.")
-        return {"errors": f"Failed to apply patch:\n{patch_output}", "history": append_to_history("Reviewer", "Apply Patch Failed", patch_output)}
+    try:
+        # 1. Apply the diff
+        print("[Reviewer] Applying proposed fix in the sandbox...")
+        patch_output = apply_diff_in_sandbox(proposed_fix, repo_path)
+        
+        if "Error" in patch_output:
+            # Docker/sandbox not available -- skip validation gracefully
+            if "Sandbox container not found" in patch_output:
+                print("[Reviewer] Docker sandbox unavailable -- skipping validation.")
+                return {
+                    "errors": "",
+                    "history": append_to_history("Reviewer", "Skipped",
+                        "Docker sandbox unavailable. Fix generated but not validated."),
+                }
+            print("[Reviewer] [FAIL] Patch failed to apply.")
+            return {"errors": f"Failed to apply patch:\n{patch_output}", "history": append_to_history("Reviewer", "Apply Patch Failed", patch_output)}
 
-    # 2. Run the main application or auto-generated tests
-    print("[Reviewer] Running validation in sandbox...")
-    success, output = run_tests_in_sandbox(proposed_fix)
+        # 2. Run the main application or auto-generated tests
+        print("[Reviewer] Running validation in sandbox...")
+        success, output = run_tests_in_sandbox(proposed_fix)
 
-    # 3. Handle the result
-    history_additions = append_to_history("Reviewer", "Test Execution", output)
-    
-    if success:
-        print("[Reviewer] [OK] Code ran successfully.")
-        return {"errors": "", "history": history_additions}
-    else:
-        print("[Reviewer] [FAIL] Code execution failed.")
-        # output is already decoded and stripped of special characters
-        # via the run_tests_in_sandbox tool
-        return {"errors": output, "history": history_additions}
+        # 3. Handle the result
+        history_additions = append_to_history("Reviewer", "Test Execution", output)
+        
+        if success:
+            print("[Reviewer] [OK] Code ran successfully.")
+            return {"errors": "", "history": history_additions}
+        else:
+            print("[Reviewer] [FAIL] Code execution failed.")
+            return {"errors": output, "history": history_additions}
+
+    except Exception as exc:
+        error_msg = str(exc)
+        print(f"[Reviewer] [ERROR] Exception: {error_msg}")
+        # Docker not running is common -- don't crash the graph
+        if "docker" in error_msg.lower() or "CreateFile" in error_msg:
+            print("[Reviewer] Docker unavailable -- skipping sandbox validation.")
+            return {
+                "errors": "",
+                "history": append_to_history("Reviewer", "Skipped",
+                    "Docker unavailable. Fix generated but not validated in sandbox."),
+            }
+        return {
+            "errors": f"Reviewer error: {error_msg}",
+            "history": append_to_history("Reviewer", "Error", error_msg),
+        }

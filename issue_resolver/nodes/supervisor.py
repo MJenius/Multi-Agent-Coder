@@ -150,5 +150,5 @@ def _deterministic_decision(
         return "coder"
     if not errors:
         return "end"
-    # Has errors -> re-research
-    return "researcher"
+    # Has errors -> retry coder with error feedback
+    return "coder"
