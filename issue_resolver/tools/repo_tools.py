@@ -6,19 +6,82 @@ via .bind_tools().  All tools include RAM-safety guards:
   - list_files:   caps output at 200 files
   - search_code:  caps output at 30 matches
   - read_file:    truncates at 500 lines
+  - ALL TOOLS:    timeout protection (30s default) to prevent hangs on large repos
 """
 
 from __future__ import annotations
 
 import os
+import time
+import threading
+from functools import wraps
 from pathlib import Path
 
 from langchain_core.tools import tool
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# UNIFIED IGNORE LIST FOR ALL REPO TOOLS
+# TIMEOUT GUARD -- Prevent hangs on large repositories
 # ─────────────────────────────────────────────────────────────────────────────
+# Cross-platform timeout implementation using threading (works on Windows + Unix)
+#
+# Why this matters:
+#   - Unix signal.SIGALRM doesn't exist on Windows
+#   - Threading-based timeout works everywhere
+#   - 30-second default prevents 4+ minute hangs on 2500+ file repos (like QRCoder)
+#   - Graceful failure with informative error message
+#
+_timeout_occurred = False
+
+def with_timeout(seconds: int = 30):
+    """Decorator to add timeout protection to repo tool functions.
+    
+    Args:
+        seconds: Maximum execution time before timeout. Default 30s.
+    
+    Usage:
+        @tool
+        @with_timeout(30)
+        def my_tool(...) -> str:
+            ...
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            result_container = [None]
+            exception_container = [None]
+            event = threading.Event()
+            
+            def target():
+                try:
+                    result_container[0] = func(*args, **kwargs)
+                except Exception as e:
+                    exception_container[0] = e
+                finally:
+                    event.set()
+            
+            thread = threading.Thread(target=target, daemon=False)
+            thread.start()
+            
+            if not event.wait(timeout=seconds):
+                # Timeout occurred
+                func_name = func.__name__
+                return (
+                    f"ERROR: {func_name}() exceeded {seconds}s timeout. "
+                    f"Repository may be too large or disk I/O is slow. "
+                    f"Try narrowing search to a specific folder (e.g., './src' or './QRCoder')."
+                )
+            
+            if exception_container[0]:
+                raise exception_container[0]
+            
+            return result_container[0]
+        
+        return wrapper
+    return decorator
+
+
+
 # CRITICAL: Every tool (list_files, search_code, read_file, generate_repo_map,
 # get_symbol_definition) must use this exact set to prevent token drowning.
 #
@@ -59,6 +122,7 @@ IGNORE_DIRS = {
 # Tool 1 -- list_files
 # ---------------------------------------------------------------------------
 @tool
+@with_timeout(20)
 def list_files(directory: str) -> str:
     """Recursively list all code files in a DIRECTORY to understand project structure.
     
@@ -107,6 +171,7 @@ def list_files(directory: str) -> str:
 # Tool 2 -- search_code
 # ---------------------------------------------------------------------------
 @tool
+@with_timeout(20)
 def search_code(query: str, directory: str) -> str:
     """Search for a string in all supported code files under a directory (grep-like).
 
@@ -158,6 +223,7 @@ def search_code(query: str, directory: str) -> str:
 # Tool 3 -- read_file
 # ---------------------------------------------------------------------------
 @tool
+@with_timeout(15)
 def read_file(file_path: str) -> str:
     """Read the full content of a file, truncated to 500 lines.
 
@@ -192,6 +258,7 @@ def read_file(file_path: str) -> str:
 # Tool 4 -- generate_repo_map
 # ---------------------------------------------------------------------------
 @tool
+@with_timeout(30)
 def generate_repo_map(directory: str, max_depth: int = 2) -> str:
     """Generates a high-level tree-view of the directory structure (ignoring common build/virtualenv folders)
     and includes the contents of README.md if present. This gives a Map of the codebase.
@@ -212,6 +279,9 @@ def generate_repo_map(directory: str, max_depth: int = 2) -> str:
     root = Path(directory).resolve()
     if not root.is_dir():
         return f"Error: '{directory}' is not a valid directory."
+
+    # ✅ SAFETY: Convert max_depth to int if LLM passes it as string
+    max_depth = int(max_depth) if isinstance(max_depth, str) else max_depth
 
     # ✅ UNIFIED FILTERING: Uses the module-level IGNORE_DIRS constant
     # This ensures consistent behavior across ALL repo tools (list_files, search_code, etc.)
@@ -293,6 +363,7 @@ def generate_repo_map(directory: str, max_depth: int = 2) -> str:
 # Tool 5 -- get_symbol_definition
 # ---------------------------------------------------------------------------
 @tool
+@with_timeout(20)
 def get_symbol_definition(symbol: str, directory: str) -> str:
     """Finds the definition of a specific class or function symbol in the codebase.
     Uses regex as a fallback to locate 'def symbol', 'class symbol', 'function symbol', etc.

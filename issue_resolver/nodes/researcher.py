@@ -6,11 +6,19 @@ Uses llama3.2 via ChatOllama with tool-binding to:
   2. Search for relevant function / class names mentioned in the issue.
   3. Read the most relevant files (max 3 files, <=500 lines each).
   4. Populate file_context with discovered code snippets.
+  
+Phase 1 Improvements:
+  - Detects direct file hints (e.g., "🎯 HINT: QRCoder/AsciiQRCode.cs")
+  - Detects repository language (C#, Python, Node.js, Java)
+  - Implements fallback search strategy for 0-result queries
+  - Timeouts on all tool calls to prevent hangs
 """
 
 from __future__ import annotations
 
 import json
+import re
+from pathlib import Path
 
 from langchain_ollama import ChatOllama
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
@@ -163,6 +171,189 @@ _MAX_TOTAL_LINES = 500  # soft cap across all files read
 
 
 # ---------------------------------------------------------------------------
+# PHASE 1 IMPROVEMENTS: Helper Functions
+# ---------------------------------------------------------------------------
+
+def _extract_hints_from_issue(issue_text: str) -> list[str]:
+    """Extract direct file path hints from issue description.
+    
+    Detects patterns like:
+      - "🎯 HINT: QRCoder/AsciiQRCode.cs"
+      - "Bug is in: src/main.py"
+      - "Look at handlers/request.py"
+      - "File: components/Button.tsx"
+    
+    Prioritizes full paths (folder/file.ext) over bare filenames.
+    
+    Args:
+        issue_text: GitHub issue body text.
+    
+    Returns:
+        List of file paths found (relative paths like "QRCoder/AsciiQRCode.cs").
+    """
+    hints = []
+    
+    # Pattern 1: Explicit path patterns (with /)
+    # Capture sequences like "QRCoder/AsciiQRCode.cs" or "src/main/File.cs"
+    path_pattern = r'\b([A-Za-z0-9_\-]+(?:/[A-Za-z0-9_\-]+)*\.(?:cs|py|js|ts|tsx|xaml|java|go|cpp|h|jsx|csproj|sln))\b'
+    path_matches = re.findall(path_pattern, issue_text)
+    
+    # Pattern 2: After explicit markers
+    # "HINT:" followed by text containing a file reference
+    marker_pattern = r'(?:hint|bug|look|check|see|focus|file|path).*?([A-Za-z0-9_\-/]+\.(?:cs|py|js|ts|tsx|xaml|java|go|cpp|h|jsx|csproj|sln))'
+    marker_matches = re.findall(marker_pattern, issue_text, re.IGNORECASE)
+    
+    # Combine matches
+    all_matches = path_matches + marker_matches
+    
+    # Remove duplicates while preserving order
+    unique_hints = []
+    seen = set()
+    for hint in all_matches:
+        # Normalize the hint
+        normalized = hint.lstrip('./')
+        if normalized not in seen:
+            unique_hints.append(normalized)
+            seen.add(normalized)
+    
+    # Prefer full paths over bare filenames
+    # If we have both "AsciiQRCode.cs" and "QRCoder/AsciiQRCode.cs", keep only the full path
+    final_hints = []
+    for hint in unique_hints:
+        # Check if this is a bare filename
+        if '/' not in hint:
+            # Only keep bare filenames if no full path version exists
+            has_full_path = any(hint in h and '/' in h for h in unique_hints)
+            if not has_full_path:
+                final_hints.append(hint)
+        else:
+            final_hints.append(hint)
+    
+    return final_hints
+
+
+def _detect_language(repo_path: str) -> str:
+    """Detect primary programming language of the repository.
+    
+    Checks for language markers like:
+      - C#: .csproj, .sln, .cs files
+      - Python: setup.py, requirements.txt, pyproject.toml, .py files
+      - Node.js: package.json, .js/.ts files
+      - Java: pom.xml, build.gradle, .java files
+    
+    Args:
+        repo_path: Path to repository root.
+    
+    Returns:
+        Language identifier: "csharp", "python", "nodejs", "java", "unknown"
+    """
+    repo = Path(repo_path).resolve()
+    
+    # Language markers (priority order)
+    markers = {
+        "csharp": [".csproj", ".sln", ".cs"],
+        "python": ["setup.py", "requirements.txt", "pyproject.toml", ".py"],
+        "nodejs": ["package.json", "package-lock.json", ".js", ".ts"],
+        "java": ["pom.xml", "build.gradle", ".java"],
+    }
+    
+    # Check for exact files
+    for lang, patterns in markers.items():
+        for pattern in patterns:
+            if pattern.startswith("."):
+                # It's a file extension; check if any exist
+                if list(repo.glob(f"**/*{pattern}")):
+                    return lang
+            else:
+                # It's a filename
+                if (repo / pattern).exists():
+                    return lang
+    
+    # Fallback: count file extensions in root + immediate children
+    try:
+        cs_count = len(list(repo.glob("*.cs"))) + len(list(repo.glob("*/*.cs")))
+        py_count = len(list(repo.glob("*.py"))) + len(list(repo.glob("*/*.py")))
+        js_count = (
+            len(list(repo.glob("*.js"))) + len(list(repo.glob("*/*.js"))) +
+            len(list(repo.glob("*.ts"))) + len(list(repo.glob("*/*.ts")))
+        )
+        java_count = len(list(repo.glob("*.java"))) + len(list(repo.glob("*/*.java")))
+        
+        counts = {
+            "csharp": cs_count,
+            "python": py_count,
+            "nodejs": js_count,
+            "java": java_count,
+        }
+        
+        max_lang = max(counts, key=counts.get)
+        if counts[max_lang] > 0:
+            return max_lang
+    except Exception:
+        pass
+    
+    return "unknown"
+
+
+def _try_search_variations(
+    base_query: str,
+    directory: str,
+    language: str = "unknown",
+    max_attempts: int = 3
+) -> tuple[str, bool]:
+    """Try progressively broader searches if base query fails.
+    
+    Implements fallback strategy:
+      1. Original query: "ASCIIQRCode"
+      2. CamelCase → snake_case: "ascii_qr_code"
+      3. Partial tokens: "ASCII", "QRCode", etc.
+    
+    Args:
+        base_query: Original search term.
+        directory: Directory to search in.
+        language: Detected language ("csharp", "python", etc.) for smarter fallbacks.
+        max_attempts: Maximum number of search variations to try.
+    
+    Returns:
+        Tuple of (result_text, found_matches). found_matches=True if matches > 0.
+    """
+    queries = [base_query]
+    
+    # Add snake_case variant
+    snake_case = re.sub(r'([A-Z])', r'_\1', base_query).lower().lstrip('_')
+    if snake_case != base_query.lower() and snake_case not in queries:
+        queries.append(snake_case)
+    
+    # Add lowercase variant
+    if base_query.lower() not in queries:
+        queries.append(base_query.lower())
+    
+    # Add partial tokens (split on CamelCase or underscores)
+    tokens = re.split(r'([A-Z][a-z]+|[a-z]+|_)', base_query)
+    tokens = [t for t in tokens if t and t != '_']
+    for token in tokens[:max_attempts]:
+        if token.lower() not in queries:
+            queries.append(token.lower())
+    
+    print(f"[Researcher] Search variations for '{base_query}': {queries[:max_attempts]}")
+    
+    for attempt, query in enumerate(queries[:max_attempts], 1):
+        try:
+            result = search_code.invoke({"query": query, "directory": directory})
+            match_count = len([l for l in result.split('\n') if l.strip() and ':' in l and not l.startswith('[')])
+            
+            if match_count > 0:
+                print(f"[Researcher] ✅ Found {match_count} match(es) for '{query}' (attempt {attempt})")
+                return result, True
+            else:
+                print(f"[Researcher] ❌ No matches for '{query}' (attempt {attempt})")
+        except Exception as e:
+            print(f"[Researcher] Error searching for '{query}': {e}")
+    
+    return f"No matches found after {len(queries)} search variations of '{base_query}'.", False
+
+
+# ---------------------------------------------------------------------------
 # Node implementation
 # ---------------------------------------------------------------------------
 def researcher_node(state: AgentState) -> dict:
@@ -194,6 +385,78 @@ def researcher_node(state: AgentState) -> dict:
     # Store initial issue into history
     history_additions.extend(append_to_history("Researcher", "Strategic Targeting", f"Repo: {repo_path}\nIssue: {issue_text}"))
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # PHASE 1: PRE-SCAN -- Detect language and extract hints
+    # ─────────────────────────────────────────────────────────────────────────
+    language = _detect_language(repo_path)
+    print(f"[Researcher] Detected language: {language}")
+    history_additions.extend(append_to_history("Researcher", "Language Detection", f"Language: {language}"))
+    
+    hint_files = _extract_hints_from_issue(issue_text)
+    if hint_files:
+        print(f"[Researcher] Found {len(hint_files)} direct hint(s): {hint_files}")
+        history_additions.extend(append_to_history("Researcher", "Hint Extraction", f"Hints: {hint_files}"))
+        
+        # Read hinted files immediately (BEFORE LLM tool loop)
+        print(f"[Researcher] Reading {len(hint_files)} hint file(s)...")
+        for idx, hint_file in enumerate(hint_files[:_MAX_FILES_READ], 1):
+            if files_read >= _MAX_FILES_READ:
+                print(f"[Researcher] Reached max file limit; skipping remaining hints.")
+                break
+            
+            # Normalize path: strip leading repo path if hint includes it
+            normalized_hint = hint_file.lstrip('./')
+            repo_name = Path(repo_path).name
+            if normalized_hint.startswith(repo_name + '/'):
+                # Hint includes repo folder (e.g., "issue_resolver/graph.py")
+                # Strip it since repo_path already points there
+                normalized_hint = normalized_hint[len(repo_name) + 1:]
+            
+            # Build absolute path
+            safe_path_resolved = (Path(repo_path) / normalized_hint).resolve()
+            
+            try:
+                result = read_file.invoke({"file_path": str(safe_path_resolved)})
+                if result.startswith("Error"):
+                    print(f"[Researcher]    ❌ Failed to read {hint_file}: {result[:100]}")
+                    history_additions.extend(
+                        append_to_history("Researcher", "Hint Read", f"Failed: {hint_file} ({result[:80]})")
+                    )
+                else:
+                    lines_in_file = result.count("\n")
+                    print(f"[Researcher]    ✅ Read {lines_in_file} lines from {hint_file}")
+                    
+                    # Store as a context snippet
+                    snippet = f"# --- [HINTED] file: {hint_file} ---\n{result}"
+                    snippets.append(snippet)
+                    files_read += 1
+                    total_lines += lines_in_file + 1
+                    
+                    history_additions.extend(
+                        append_to_history("Researcher", "Hint Read", f"✅ {hint_file} ({lines_in_file} lines)")
+                    )
+            except Exception as e:
+                print(f"[Researcher]    ❌ Exception reading {hint_file}: {e}")
+                history_additions.extend(
+                    append_to_history("Researcher", "Hint Read", f"Exception: {str(e)[:80]}")
+                )
+    
+    # Early exit if hints were sufficient
+    if snippets and files_read >= _MAX_FILES_READ:
+        print(f"[Researcher] Hints satisfied file limit ({files_read}/{_MAX_FILES_READ}). Skipping LLM search.")
+        print(f"[Researcher] Done -- collected {len(snippets)} snippet(s), "
+              f"{files_read} file(s) read, ~{total_lines} lines.")
+        history_additions.extend(
+            append_to_history("Researcher", "Targeting Complete", f"Collected {len(snippets)} snippets (from hints). Read {files_read} files.")
+        )
+        return {
+            "file_context": snippets,
+            "history": history_additions
+        }
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # PHASE 2: LLM-DRIVEN SEARCH (Fall back to this if hints didn't provide enough)
+    # ─────────────────────────────────────────────────────────────────────────
     for round_num in range(1, _MAX_TOOL_ROUNDS + 1):
         print(f"[Researcher]  |-- Round {round_num}/{_MAX_TOOL_ROUNDS}")
 
