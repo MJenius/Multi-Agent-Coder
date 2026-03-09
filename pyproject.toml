@@ -13,6 +13,7 @@ dependencies = [
     "PyGithub",
     "GitPython",
     "python-dotenv",
+    "docker",
 ]
 
 [project.optional-dependencies]

@@ -4,7 +4,20 @@ Sandbox tools -- Uses the Docker SDK to interact with the sandbox container.
 
 import os
 import re
-import docker
+
+try:
+    import docker
+except ImportError:
+    docker = None
+
+
+def _check_docker_available():
+    """Check if docker module is available; raise helpful error if not."""
+    if docker is None:
+        raise ImportError(
+            "Docker module not installed. Install it with: pip install docker\n"
+            "The sandbox tools require Docker to be installed and running."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +89,7 @@ def _repair_diff_hunks(diff_text: str) -> str:
 
 def get_sandbox_container():
     """Finds the sandbox container using labels."""
+    _check_docker_available()
     try:
         client = docker.from_env()
         containers = client.containers.list(filters={"label": "com.issue_resolver.role=sandbox"})
