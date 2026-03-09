@@ -74,7 +74,7 @@ if st.button("🚀 Start Resolution Process"):
                 
                 # Add strategic hint for SOTA projects (like QRCoder)
                 if "qr" in body.lower() or "ascii" in body.lower():
-                    issue_content += "\n\n🎯 HINT: For QRCoder issues involving ASCII rendering, the bug is likely in QRCoder/AsciiQRCode.cs. Focus your search there."
+                    issue_content += "\n\n🎯 HINT: QRCoder/AsciiQRCode.cs"
             except Exception as e:
                 st.error(f"Error fetching issue: {e}")
                 st.stop()
