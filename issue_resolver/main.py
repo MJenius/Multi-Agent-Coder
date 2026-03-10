@@ -48,10 +48,14 @@ def main() -> None:
         "issue": SAMPLE_ISSUE,
         "repo_path": repo_path,
         "file_context": [],
+        "plan": "",
         "proposed_fix": "",
         "errors": "",
+        "validation_status": "",
         "next_step": "",
         "iterations": 0,
+        "is_resolved": False,
+        "contribution_guidelines": "",
         "history": [],
     }
 

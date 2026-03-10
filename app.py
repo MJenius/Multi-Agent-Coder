@@ -100,15 +100,18 @@ if st.button("🚀 Start Resolution Process"):
             "issue": issue_content,
             "repo_path": sandbox_dir,
             "file_context": [],
+            "plan": "",
             "proposed_fix": "",
             "errors": "",
             "validation_status": "",
+            "next_step": "",
             "iterations": 0,
             "is_resolved": False,
+            "contribution_guidelines": "",
             "history": []
         }
 
-        # 4. Stream Execution
+        # 4. Stream Execution with Stop Support
         if "stop_requested" not in st.session_state:
             st.session_state.stop_requested = False
 
@@ -119,14 +122,15 @@ if st.button("🚀 Start Resolution Process"):
             st.session_state.stop_requested = True
 
         stop_container = st.empty()
-        stop_container.button("🛑 STOP Execution", key="stop_btn", on_click=_request_stop)
+        stop_btn = stop_container.button("🛑 STOP Execution", key="stop_btn", on_click=_request_stop)
         thought_container = st.empty()
         thought_log = ""
         
         final_state = initial_state
         
+        # Stream execution with stop checks between events
         for event in agent_graph.stream(initial_state):
-            # Check if stop was requested via callback
+            # Check if stop was requested - exit immediately
             if st.session_state.get("stop_requested"):
                 st.session_state.stop_requested = False
                 st.warning("⚠️ Execution stopped by user.")
@@ -137,10 +141,14 @@ if st.button("🚀 Start Resolution Process"):
                 if new_logs:
                     for entry in new_logs:
                         thought_log += f"**[{node_name}]**: {entry}\n\n"
-                        thought_container.markdown(f'<div class="thought-trace">{thought_log}</div>', unsafe_allow_html=True)
+                        # Update UI immediately with each log entry
+                        thought_container.markdown(
+                            f'<div class="thought-trace">{thought_log}</div>', 
+                            unsafe_allow_html=True
+                        )
                 
                 final_state.update(state_update)
-                
+
         # Remove the trace window when execution finishes
         trace_header.empty()
         stop_container.empty()

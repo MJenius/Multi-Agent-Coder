@@ -26,7 +26,11 @@ SUPERVISOR_MODEL: str = os.environ.get("OLLAMA_SUPERVISOR_MODEL", "llama3.2:late
 CODER_MODEL: str = os.environ.get("OLLAMA_CODER_MODEL", "qwen2.5-coder:7b")
 RESEARCHER_MODEL: str = os.environ.get("OLLAMA_RESEARCHER_MODEL", "llama3.2:latest")
 
-CODER_NUM_PREDICT: int = int(os.environ.get("OLLAMA_CODER_NUM_PREDICT", "1024"))
+# Performance-optimized defaults (reduce for faster operation, increase for complex fixes)
+# Reduced from 1024 to 400 for faster generation (most fixes are ~100-200 tokens)
+CODER_NUM_PREDICT: int = int(os.environ.get("OLLAMA_CODER_NUM_PREDICT", "400"))
+# Reduced from 2 to 1 retry (2 total attempts) - smarter targeting makes retries less needed  
+CODER_MAX_RETRIES: int = int(os.environ.get("CODER_MAX_RETRIES", "1"))
 
 # ---------------------------------------------------------------------------
 # Graph

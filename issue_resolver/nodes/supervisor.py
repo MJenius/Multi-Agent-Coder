@@ -55,6 +55,25 @@ def supervisor_node(state: AgentState) -> dict:
     validation_status = state.get("validation_status", "")
     iterations = state.get("iterations", 0)
 
+    # Terminal coder failure guard: avoid routing back to coder forever.
+    if isinstance(errors, str) and errors.startswith("CODE FIX FAILED after"):
+        print("[Supervisor] [GUARD] Terminal coder failure detected. Ending run.")
+        return {
+            "next_step": "end",
+            "iterations": iterations + 1,
+            "is_resolved": False,
+            "history": append_to_history(
+                "Supervisor",
+                "Failure Summary",
+                "Coder exhausted retries with no applicable fix. Ending run to avoid loop.",
+            ),
+        }
+
+    # HARD GUARD: If we have code but no fix, route to coder (MUST happen before any LLM call)
+    if file_context and not proposed_fix:
+        print("[Supervisor] [GUARD] Code found but no fix proposed. Routing to coder.")
+        return {"next_step": "coder", "iterations": iterations + 1}
+
     # HARD GUARD: Tri-state validation check
     if proposed_fix and not errors:
         if validation_status == "passed":

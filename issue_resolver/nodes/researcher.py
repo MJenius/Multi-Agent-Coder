@@ -252,6 +252,75 @@ def _try_search_variations(
     return f"No matches found after {len(queries)} search variations of '{base_query}'.", False
 
 
+def _extract_keywords_from_issue(issue_text: str) -> list[str]:
+    """Extract searchable function/class names from issue text.
+    
+    Looks for backtick-wrapped identifiers and camelCase/PascalCase names
+    that are likely function or class names worth searching for.
+    """
+    keywords = []
+    
+    # 1. Backtick-wrapped identifiers: `isMobilePhone`, `calculate_total()`
+    for m in re.findall(r'`([A-Za-z_][A-Za-z0-9_]*(?:\([^)]*\))?)`', issue_text):
+        name = m.split('(')[0]
+        if len(name) >= 4 and name.lower() not in ('true', 'false', 'null', 'undefined', 'none'):
+            keywords.append(name)
+    
+    # 2. camelCase identifiers in prose (at least 6 chars, must have mixed case)
+    for m in re.findall(r'\b([a-z][a-zA-Z0-9]{5,})\b', issue_text):
+        if any(c.isupper() for c in m) and m not in keywords:
+            keywords.append(m)
+    
+    # Deduplicate preserving order
+    seen = set()
+    unique = []
+    for k in keywords:
+        if k not in seen:
+            seen.add(k)
+            unique.append(k)
+    return unique
+
+
+def _get_top_file_from_search(search_result: str) -> str | None:
+    """Parse search_code output and return the most relevant file path.
+    
+    Prefers source implementation files over test files and entry points.
+    Priority: src/lib files > other source > test files > index/main files.
+    """
+    from collections import Counter
+    file_counts: Counter[str] = Counter()
+    
+    for line in search_result.split('\n'):
+        if ':' in line and not line.startswith('['):
+            parts = line.split(':', 2)
+            if len(parts) >= 2:
+                file_path = parts[0].strip()
+                if file_path:
+                    # Normalize path separators
+                    file_counts[file_path.replace('\\', '/')] += 1
+    
+    if not file_counts:
+        return None
+    
+    candidates = file_counts.most_common()
+    
+    # Score each candidate: lower score = better priority
+    def _score(path: str) -> int:
+        name = Path(path).name.lower()
+        path_lower = path.lower()
+        if 'test' in path_lower or 'spec' in path_lower:
+            return 3  # Test files: low priority
+        if 'index' in name or 'main' in name:
+            return 2  # Entry points: medium-low
+        if 'src/' in path_lower or 'lib/' in path_lower:
+            return 0  # Source/library: highest
+        return 1  # Other source files
+    
+    # Sort by score (ascending), then by match count (descending)
+    best = min(candidates, key=lambda item: (_score(item[0]), -item[1]))
+    return best[0]
+
+
 # ---------------------------------------------------------------------------
 # Node implementation
 # ---------------------------------------------------------------------------
@@ -291,6 +360,22 @@ def researcher_node(state: AgentState) -> dict:
     print(f"[Researcher] Detected language: {language}")
     history_additions.extend(append_to_history("Researcher", "Language Detection", f"Language: {language}"))
     
+    # ── Auto-read CONTRIBUTING.md if present ───────────────────────────────
+    contribution_guidelines = ""
+    contributing_path = Path(repo_path) / "CONTRIBUTING.md"
+    if contributing_path.exists():
+        try:
+            result = read_file.invoke({"file_path": str(contributing_path.resolve())})
+            if not result.startswith("Error"):
+                contribution_guidelines = result
+                line_count = result.count("\n")
+                print(f"[Researcher] ✅ Read CONTRIBUTING.md ({line_count} lines)")
+                history_additions.extend(
+                    append_to_history("Researcher", "Contributing Guide", f"Read CONTRIBUTING.md ({line_count} lines)")
+                )
+        except Exception as e:
+            print(f"[Researcher] ⚠ Could not read CONTRIBUTING.md: {e}")
+    
     hint_files = _extract_hints_from_issue(issue_text)
     if hint_files:
         print(f"[Researcher] Found {len(hint_files)} direct hint(s): {hint_files}")
@@ -307,12 +392,17 @@ def researcher_node(state: AgentState) -> dict:
             normalized_hint = hint_file.lstrip('./')
             repo_name = Path(repo_path).name
             if normalized_hint.startswith(repo_name + '/'):
-                # Hint includes repo folder (e.g., "issue_resolver/graph.py")
-                # Strip it since repo_path already points there
                 normalized_hint = normalized_hint[len(repo_name) + 1:]
             
-            # Build absolute path
+            # Build absolute path and validate existence BEFORE reading
             safe_path_resolved = (Path(repo_path) / normalized_hint).resolve()
+            
+            if not safe_path_resolved.is_file():
+                print(f"[Researcher]    ⏭ Skipping '{hint_file}' (not a real file in repo)")
+                history_additions.extend(
+                    append_to_history("Researcher", "Hint Skip", f"'{hint_file}' not found in repo")
+                )
+                continue
             
             try:
                 result = read_file.invoke({"file_path": str(safe_path_resolved)})
@@ -325,7 +415,6 @@ def researcher_node(state: AgentState) -> dict:
                     lines_in_file = result.count("\n")
                     print(f"[Researcher]    ✅ Read {lines_in_file} lines from {hint_file}")
                     
-                    # Store as a context snippet
                     snippet = f"# --- [HINTED] file: {hint_file} ---\n{result}"
                     snippets.append(snippet)
                     files_read += 1
@@ -341,8 +430,6 @@ def researcher_node(state: AgentState) -> dict:
                 )
     
     # Early exit if hints provided ANY relevant content
-    # Key insight: if we have hint files with actual code, the LLM loop just wastes time
-    # calling generate_repo_map and re-discovering what we already have
     if snippets and files_read >= 1:
         print(f"[Researcher] ✅ Hints provided {files_read} file(s), {total_lines} lines. Skipping LLM search.")
         print(f"[Researcher] Done -- collected {len(snippets)} snippet(s), "
@@ -350,10 +437,75 @@ def researcher_node(state: AgentState) -> dict:
         history_additions.extend(
             append_to_history("Researcher", "Targeting Complete", f"Collected {len(snippets)} snippets (from hints). Read {files_read} files.")
         )
-        return {
+        return_dict = {
             "file_context": snippets,
             "history": history_additions
         }
+        if contribution_guidelines:
+            return_dict["contribution_guidelines"] = contribution_guidelines
+        return return_dict
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # PHASE 1.5: AUTO-SEARCH -- Extract keywords from issue, search & auto-read
+    # ─────────────────────────────────────────────────────────────────────────
+    # When hints fail (e.g., "Validator.js" isn't a real file), extract function
+    # names from the issue text and search for them. This doesn't depend on the
+    # LLM chaining tool calls correctly.
+    if not snippets:
+        keywords = _extract_keywords_from_issue(issue_text)
+        if keywords:
+            print(f"[Researcher] Auto-search keywords from issue: {keywords[:3]}")
+            history_additions.extend(
+                append_to_history("Researcher", "Auto-Search", f"Keywords: {keywords[:3]}")
+            )
+            
+            for keyword in keywords[:2]:
+                if files_read >= _MAX_FILES_READ:
+                    break
+                try:
+                    result = search_code.invoke({"query": keyword, "directory": repo_path})
+                    if not result.startswith("No matches"):
+                        match_count = len([l for l in result.split('\n') if l.strip() and ':' in l and not l.startswith('[')])
+                        print(f"[Researcher] ✅ Auto-search '{keyword}': {match_count} match(es)")
+                        
+                        # Auto-read the most relevant file from results
+                        top_file = _get_top_file_from_search(result)
+                        if top_file:
+                            # Normalize separator and build path
+                            top_file_normalized = top_file.replace('\\', '/')
+                            file_path = str((Path(repo_path) / top_file_normalized).resolve())
+                            file_result = read_file.invoke({"file_path": file_path})
+                            if not file_result.startswith("Error"):
+                                lines_in_file = file_result.count("\n")
+                                print(f"[Researcher] ✅ Auto-read '{top_file_normalized}' ({lines_in_file} lines)")
+                                snippet = f"# --- file: {top_file_normalized} ---\n{file_result}"
+                                snippets.append(snippet)
+                                files_read += 1
+                                total_lines += lines_in_file + 1
+                                history_additions.extend(
+                                    append_to_history("Researcher", "Auto-Read", f"✅ {top_file_normalized} ({lines_in_file} lines)")
+                                )
+                                break  # Got what we need
+                    else:
+                        print(f"[Researcher] ❌ Auto-search '{keyword}': no matches")
+                except Exception as e:
+                    print(f"[Researcher] ⚠ Auto-search error for '{keyword}': {e}")
+    
+    # Early exit if auto-search found relevant code
+    if snippets and files_read >= 1:
+        print(f"[Researcher] ✅ Auto-search provided {files_read} file(s), {total_lines} lines. Skipping LLM loop.")
+        print(f"[Researcher] Done -- collected {len(snippets)} snippet(s), "
+              f"{files_read} file(s) read, ~{total_lines} lines.")
+        history_additions.extend(
+            append_to_history("Researcher", "Targeting Complete", f"Collected {len(snippets)} snippets (auto-search). Read {files_read} files.")
+        )
+        return_dict = {
+            "file_context": snippets,
+            "history": history_additions
+        }
+        if contribution_guidelines:
+            return_dict["contribution_guidelines"] = contribution_guidelines
+        return return_dict
 
     # ─────────────────────────────────────────────────────────────────────────
     # PHASE 2: LLM-DRIVEN SEARCH (Fall back to this only if hints didn't work)
@@ -439,6 +591,24 @@ def researcher_node(state: AgentState) -> dict:
                 snippet = f"# --- file: {file_label} ---\n{result}"
                 snippets.append(snippet)
 
+            # Auto-read: if search_code found matches but LLM might not follow up
+            if fn_name == "search_code" and not result.startswith(("No matches", "Error", "ERROR")):
+                top_file = _get_top_file_from_search(result)
+                if top_file and files_read < _MAX_FILES_READ:
+                    top_file_normalized = top_file.replace('\\', '/')
+                    auto_path = str((Path(repo_path) / top_file_normalized).resolve())
+                    try:
+                        auto_result = read_file.invoke({"file_path": auto_path})
+                        if not auto_result.startswith(("Error", "[BLOCKED")):
+                            lines_in_auto = auto_result.count("\n")
+                            print(f"[Researcher]    🔄 Auto-read from search: '{top_file_normalized}' ({lines_in_auto} lines)")
+                            snippet = f"# --- file: {top_file_normalized} ---\n{auto_result}"
+                            snippets.append(snippet)
+                            files_read += 1
+                            total_lines += lines_in_auto + 1
+                    except Exception:
+                        pass
+
             messages.append(ToolMessage(content=str(result), tool_call_id=call_id))
 
     print(f"[Researcher] Done -- collected {len(snippets)} snippet(s), "
@@ -446,7 +616,10 @@ def researcher_node(state: AgentState) -> dict:
 
     history_additions.extend(append_to_history("Researcher", "Targeting Complete", f"Collected {len(snippets)} snippets. Read {files_read} files."))
 
-    return {
+    return_dict = {
         "file_context": snippets,
         "history": history_additions
     }
+    if contribution_guidelines:
+        return_dict["contribution_guidelines"] = contribution_guidelines
+    return return_dict
