@@ -4,15 +4,18 @@ Uses real LLM output samples (markdown with headers and code blocks)
 to verify the parser handles them correctly.
 """
 
+from typing import cast
+
 from issue_resolver.nodes.coder import (
     _parse_fix,
     _strip_markdown,
     _find_and_replace,
     _extract_plan,
   _attempt_fix,
-  _extract_issue_literals,
+  _extract_issue_identifiers,
   coder_node,
 )
+from issue_resolver.state import AgentState
 
 
 # ── Test data: actual LLM output samples ─────────────────────────────────
@@ -215,7 +218,7 @@ class TestAttemptFixRelevance:
             "Title: isMobilePhone('uz-UZ') returns false for valid Uzbekistan carrier codes\n"
             "Body: +998770179999 should pass"
         )
-        literals = _extract_issue_literals(issue)
+        literals = _extract_issue_identifiers(issue)
         file_info = {"src/lib/isMobilePhone.js": SOURCE_FILE}
         known_paths = ["src/lib/isMobilePhone.js"]
 
@@ -231,7 +234,7 @@ class TestAttemptFixRelevance:
     def test_accepts_relevant_literal_fix_candidate(self):
         """Literal-targeted candidate should be accepted and produce a diff."""
         issue = "Fix uz-UZ regex for +99877 numbers"
-        literals = _extract_issue_literals(issue)
+        literals = _extract_issue_identifiers(issue)
         file_info = {"src/lib/isMobilePhone.js": SOURCE_FILE}
         known_paths = ["src/lib/isMobilePhone.js"]
 
@@ -272,12 +275,20 @@ class TestAttemptFixRelevance:
         file_context = [
           "# --- file: src/lib/isMobilePhone.js ---\n" + SOURCE_FILE
         ]
-        state = {
+        state = cast(AgentState, {
           "issue": "isMobilePhone('uz-UZ') fails for +99877 numbers",
+          "repo_path": "./sandbox_workspace",
           "file_context": file_context,
+          "plan": "",
+          "proposed_fix": "",
           "errors": "",
+          "validation_status": "",
+          "next_step": "",
+          "iterations": 0,
+          "is_resolved": False,
           "contribution_guidelines": "",
-        }
+          "history": [],
+        })
 
         out = coder_node(state)
         assert "proposed_fix" in out
