@@ -30,6 +30,7 @@ from issue_resolver.utils.token_bucket import (
 
 _SELECTED_MODEL_BY_ROLE: dict[str, str] = {}
 _DECOMMISSIONED_MODELS: set[str] = set()  # Models removed due to 400 errors (decommissioned)
+_QUOTA_EXCEEDED_MODELS: set[str] = set()  # Models that hit daily TPD limits this session (temporary)
 
 
 def calculate_max_tokens(
@@ -116,6 +117,37 @@ def _is_model_decommissioned(exc: Exception) -> bool:
     return is_bad_request
 
 
+def _is_quota_exceeded(exc: Exception) -> bool:
+    """Detect daily quota limit exceeded (429 TPD error).
+    
+    Different from transient rate limits, TPD (Tokens Per Day) limits are permanent
+    for the day and cannot be resolved by waiting. When hit, the model should be
+    skipped for the rest of the session but can be retried tomorrow.
+    
+    TPD errors are a specific type of 429 (Too Many Requests) that mention:
+    - 'tokens per day' or 'TPD'
+    - 'daily' + ('quota' or 'limit')
+    - 'exceeded' + ('daily' or 'quota')
+    """
+    text = str(exc).lower()
+    
+    # Detect TPD-specific 429 errors
+    tpd_markers = (
+        "tokens per day",
+        "tokens_per_day",
+        "tpd",
+        "daily quota",
+        "daily token",
+        "daily limit",
+    )
+    
+    # Must be a 429 error containing TPD indicators
+    has_quota_indicator = any(marker in text for marker in tpd_markers)
+    is_429 = "429" in text or "too many requests" in text
+    
+    return is_429 and has_quota_indicator
+
+
 def _invoke_with_backoff(llm: Any, messages: list[Any], role: str) -> Any:
     delay = LLM_BACKOFF_INITIAL_SECONDS
     last_exc: Exception | None = None
@@ -159,13 +191,19 @@ def invoke_with_role_fallback(
     if not GROQ_API_KEY:
         raise RuntimeError("GROQ_API_KEY is not configured")
 
-    # Filter out decommissioned models (Phase 4: adaptive downscaling)
-    available_candidates = [m for m in candidates if m not in _DECOMMISSIONED_MODELS]
+    # Filter out decommissioned and quota-exceeded models
+    excluded = _DECOMMISSIONED_MODELS | _QUOTA_EXCEEDED_MODELS
+    available_candidates = [m for m in candidates if m not in excluded]
     if not available_candidates:
         if _DECOMMISSIONED_MODELS:
             raise RuntimeError(
                 f"{role}: all model candidates have been decommissioned: {_DECOMMISSIONED_MODELS}. "
                 "Please update model configuration in config.py"
+            )
+        if _QUOTA_EXCEEDED_MODELS:
+            raise RuntimeError(
+                f"{role}: all models exceeded their daily quota: {_QUOTA_EXCEEDED_MODELS}. "
+                "Please try again tomorrow or use a different API key."
             )
         raise RuntimeError(f"{role}: no model candidates configured")
 
@@ -210,7 +248,7 @@ def invoke_with_role_fallback(
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
             
-            # Phase 4: Detect permanent decommissioning (400 error)
+            # Phase 4A: Detect permanent decommissioning (400 error)
             if _is_model_decommissioned(exc):
                 print(f"[{role}] [DECOMMISSIONED] Model '{model_name}' is permanently unavailable (400 error)")
                 print(f"[{role}] [DECOMMISSIONED] Removing from session candidates: {model_name}")
@@ -219,6 +257,16 @@ def invoke_with_role_fallback(
                 if _SELECTED_MODEL_BY_ROLE.get(role) == model_name:
                     del _SELECTED_MODEL_BY_ROLE[role]
                 continue  # Try next candidate
+            
+            # Phase 4B: Detect daily quota exceeded (429 TPD error) - skip for session
+            if _is_quota_exceeded(exc):
+                print(f"[{role}] [QUOTA_EXCEEDED] Model '{model_name}' hit daily TPD limit")
+                print(f"[{role}] [QUOTA_EXCEEDED] Skipping for rest of session: {model_name}")
+                _QUOTA_EXCEEDED_MODELS.add(model_name)
+                # Clear selected model cache if this model was selected
+                if _SELECTED_MODEL_BY_ROLE.get(role) == model_name:
+                    del _SELECTED_MODEL_BY_ROLE[role]
+                continue  # Try next candidate (don't retry same model)
             
             # Detect temporary unavailability or unsupported model errors
             if _is_model_unavailable(exc):

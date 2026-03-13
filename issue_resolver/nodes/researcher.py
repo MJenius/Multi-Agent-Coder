@@ -12,6 +12,11 @@ Phase 1 Improvements:
   - Detects repository language (C#, Python, Node.js, Java)
   - Implements fallback search strategy for 0-result queries
   - Timeouts on all tool calls to prevent hangs
+
+Phase 3A Improvements:
+  - Ripgrep-based search with case variant detection
+  - CamelCase / snake_case / kebab-case variant generation
+  - Core library prioritization over test files
 """
 
 from __future__ import annotations
@@ -26,6 +31,7 @@ from issue_resolver.state import AgentState
 from issue_resolver.utils.logger import append_to_history
 from issue_resolver.config import RESEARCHER_MODEL_CANDIDATES
 from issue_resolver.llm_utils import invoke_with_role_fallback
+from issue_resolver.utils.ripgrep_search import smart_search, generate_search_variants
 from issue_resolver.tools import (
     REPO_TOOLS, 
     list_files, 
@@ -516,10 +522,12 @@ def researcher_node(state: AgentState) -> dict:
 
     # ─────────────────────────────────────────────────────────────────────────
     # PHASE 1.5: AUTO-SEARCH -- Extract keywords from issue, search & auto-read
-    # ─────────────────────────────────────────────────────────────────────────
+    # 
+    # Enhanced with Phase 3A: Ripgrep variant detection
     # When hints fail (e.g., "Validator.js" isn't a real file), extract function
     # names from the issue text and search for them. This doesn't depend on the
     # LLM chaining tool calls correctly.
+    # ─────────────────────────────────────────────────────────────────────────
     if not snippets:
         keywords = _extract_keywords_from_issue(issue_text)
         if keywords:
@@ -532,10 +540,39 @@ def researcher_node(state: AgentState) -> dict:
                 if files_read >= _MAX_FILES_READ:
                     break
                 try:
+                    # Phase 3A: Try ripgrep smart search first (with case variants)
+                    ripgrep_matches = smart_search(keyword, repo_path, prefer_core_lib=True, max_results=10)
+                    if ripgrep_matches:
+                        match_count = len(ripgrep_matches)
+                        variants_found = generate_search_variants(keyword)
+                        print(f"[Researcher] ✅ Ripgrep '{keyword}' (variants: {variants_found}): {match_count} match(es)")
+                        
+                        # Auto-read the most relevant file (highest priority)
+                        top_match = ripgrep_matches[0]
+                        top_file = top_match['file']
+                        
+                        if top_file:
+                            # Normalize separator and build path
+                            top_file_normalized = top_file.replace('\\', '/')
+                            file_path = str((Path(repo_path) / top_file_normalized).resolve())
+                            file_result = read_file.invoke({"file_path": file_path})
+                            if not file_result.startswith("Error"):
+                                lines_in_file = file_result.count("\n")
+                                print(f"[Researcher] ✅ Auto-read '{top_file_normalized}' ({lines_in_file} lines)")
+                                snippet = f"# --- file: {top_file_normalized} ---\n{file_result}"
+                                snippets.append(snippet)
+                                files_read += 1
+                                total_lines += lines_in_file + 1
+                                history_additions.extend(
+                                    append_to_history("Researcher", "Auto-Read (Ripgrep)", f"✅ {top_file_normalized} ({lines_in_file} lines)")
+                                )
+                                continue  # Got what we need, try next keyword
+                    
+                    # Fallback: Try standard search_code if ripgrep didn't find anything
                     result = search_code.invoke({"query": keyword, "directory": repo_path})
                     if not result.startswith("No matches"):
                         match_count = len([l for l in result.split('\n') if l.strip() and ':' in l and not l.startswith('[')])
-                        print(f"[Researcher] ✅ Auto-search '{keyword}': {match_count} match(es)")
+                        print(f"[Researcher] ✅ Auto-search '{keyword}' (fallback): {match_count} match(es)")
                         
                         # Auto-read the most relevant file from results
                         top_file = _get_top_file_from_search(result)
@@ -556,7 +593,7 @@ def researcher_node(state: AgentState) -> dict:
                                 )
                                 break  # Got what we need
                     else:
-                        print(f"[Researcher] ❌ Auto-search '{keyword}': no matches")
+                        print(f"[Researcher] ❌ Auto-search '{keyword}': no matches (ripgrep + fallback)")
                 except Exception as e:
                     print(f"[Researcher] ⚠ Auto-search error for '{keyword}': {e}")
     

@@ -28,7 +28,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 
 from issue_resolver.state import AgentState
 from issue_resolver.utils.logger import append_to_history
-from issue_resolver.config import PLANNER_MODEL_CANDIDATES
+from issue_resolver.config import PLANNER_MODEL_CANDIDATES, GROQ_CONTEXT_WINDOWS
 from issue_resolver.llm_utils import invoke_with_role_fallback, calculate_max_tokens
 
 
@@ -87,16 +87,65 @@ def planner_node(state: AgentState) -> dict:
             ),
         }
     
-    # Build prompt context
+    # Build prompt context with careful truncation for 8K model windows
+    # Strategy: Limit to most-essential context to fit within model's window
     context_parts = []
     
-    if symbol_map:
-        context_parts.append(f"## Symbol Map (Top Functions/Classes)\n{symbol_map}")
+    # Phase 3A: Intelligent context optimization for smaller models (8K)
+    # Get the first model's context window to know our budget
+    first_model = PLANNER_MODEL_CANDIDATES[0] if PLANNER_MODEL_CANDIDATES else "llama-3.3-70b-versatile"
+    context_window = GROQ_CONTEXT_WINDOWS.get(first_model, 8192)
     
+    # Reserve tokens: system_prompt + issue_text + base instruction = ~1200 tokens
+    # Reserve for output: 800 tokens (plan generation)
+    # Available for context: context_window - 2000 (conservative buffer)
+    available_for_context = context_window - 2000
+    
+    # Build symbol map: only include symbols from files in current file_context
+    truncated_symbol_map = symbol_map
+    if symbol_map and file_context:
+        # Extract file names from file_context metadata
+        context_files = set()
+        for item in file_context:
+            if isinstance(item, str):
+                # Try to extract file name from first line like "File: path/to/file.py"
+                if "File:" in item:
+                    file_path = item.split("File:")[1].split("\n")[0].strip()
+                    context_files.add(file_path)
+        
+        # Filter symbol map to only relevant symbols
+        if context_files:
+            symbol_lines = symbol_map.split('\n')
+            relevant_symbols = []
+            for line in symbol_lines:
+                # Check if any context file name appears in the symbol line
+                if any(fname in line for fname in context_files):
+                    relevant_symbols.append(line)
+            
+            # Limit to top 20 symbols that are relevant
+            if relevant_symbols:
+                truncated_symbol_map = '\n'.join(relevant_symbols[:20])
+            else:
+                # If no file names match, just take first 15 symbols
+                truncated_symbol_map = '\n'.join(symbol_lines[:15])
+    elif symbol_map:
+        # No file context, just limit symbol map
+        truncated_symbol_map = '\n'.join(symbol_map.split('\n')[:15])
+    
+    if truncated_symbol_map:
+        context_parts.append(f"## Symbol Map (Top Functions/Classes)\n{truncated_symbol_map}")
+    
+    # Limit file_context to top 3-4 files (highest priority)
     if file_context:
-        context_parts.append(f"## Code Context\n" + "\n\n".join(file_context))
+        truncated_file_context = file_context[:4]
+        context_parts.append(f"## Code Context\n" + "\n\n".join(truncated_file_context))
     
     context_str = "\n\n".join(context_parts) if context_parts else "(no context available)"
+    
+    # Log context optimization
+    print(f"[Planner] Context optimization: {first_model} (window={context_window})")
+    print(f"[Planner] Truncated symbol_map: {len(symbol_map.split(chr(10)))} → {len(truncated_symbol_map.split(chr(10)))} lines")
+    print(f"[Planner] Truncated file_context: {len(file_context)} → {len(file_context[:4])} files")
     
     # Build messages
     prompt_content = f"""{issue_text}

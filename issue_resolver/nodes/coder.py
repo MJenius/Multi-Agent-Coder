@@ -42,6 +42,17 @@ CRITICAL RULES:
 7. If issue title is clear (e.g., "Always use UTF-8 ECI"), find where encoding is set and fix it
 8. Output ONLY <plan> and <fix> tags - no extra commentary
 
+SAFE ATTRIBUTE ACCESS FOR OPTIONAL FIELDS:
+Special handling needed for objects with optional attributes (like Stripe models):
+✅ CORRECT: value = getattr(obj, "attribute_name", None)
+✅ CORRECT: if hasattr(obj, "attribute_name"): value = obj.attribute_name
+❌ WRONG:  value = obj.attribute_name  (raises AttributeError if missing)
+
+When accessing optional attributes, always:
+- Use getattr(obj, "attr", default_value) to safely get with fallback
+- Or check with hasattr(obj, "attr") before accessing
+- This prevents AttributeError when attributes don't exist on all instances
+
 DO NOT include:
 ❌ Line numbers: "157: ", "158: "
 ❌ Markdown fences: "```", "```javascript"
@@ -51,6 +62,7 @@ EXAMPLES OF ISSUES YOU CAN FIX WITH PARTIAL CODE:
 ✅ "Always use UTF-8 ECI mode" + partial file → find encoder config, add ECI flag
 ✅ "Fix null pointer in handler" + class file → find null check, add safety check
 ✅ "Missing return value" + method stub → infer return statement from issue context
+✅ "AttributeError on optional field" → use getattr() or hasattr() for safe access
 
 BE BOLD: Use the issue title + context to make the surgical fix.
 """
