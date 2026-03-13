@@ -102,14 +102,6 @@ PLANNER_MODEL_CANDIDATES: list[str] = _parse_model_list(
         "llama-3.1-70b-versatile",  # Fallback: strong planning capability
     ],
 )
-TESTGEN_MODEL_CANDIDATES: list[str] = _parse_model_list(
-    "GROQ_TESTGEN_MODELS",
-    [
-        "qwen-2.5-coder-32b",  # best for test generation
-        "llama-3.3-70b-versatile",  # fallback
-    ],
-)
-
 PLANNER_MODEL: str = PLANNER_MODEL_CANDIDATES[0]
 TESTGEN_MODEL: str = TESTGEN_MODEL_CANDIDATES[0]
 

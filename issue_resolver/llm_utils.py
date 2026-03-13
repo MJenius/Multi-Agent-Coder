@@ -32,13 +32,15 @@ _SELECTED_MODEL_BY_ROLE: dict[str, str] = {}
 _DECOMMISSIONED_MODELS: set[str] = set()  # Models removed due to 400 errors (decommissioned)
 _QUOTA_EXCEEDED_MODELS: set[str] = set()  # Models that hit daily TPD limits this session (temporary)
 
-# Explicit name mapping for decommissioned models → fallback candidates
-# If a model is confirmed dead, automatically redirect to alternative
-_DECOMMISSIONED_MODEL_MAPPING: dict[str, str] = {
+# Gold Standard: Explicit model alias mapping for decommissioned → fallback
+# Implements dynamic resilience to prevent "Model Drift" (using retired endpoint IDs)
+# If a model is confirmed dead by Groq API, automatically redirect to alternative
+_MODEL_ALIASES: dict[str, str] = {
     "mixtral-8x7b-32768": "llama-3.3-70b-versatile",
-    "qwen-2.5-coder-32b": "llama-3.3-70b-versatile",
     "mixtral-8x7b": "llama-3.3-70b-versatile",
+    "qwen-2.5-coder-32b": "llama-3.3-70b-versatile",
     "qwen-2.5": "llama-3.3-70b-versatile",
+    "llama-3.1-70b-versatile": "llama-3.3-70b-versatile",  # Also auto-upgrade to latest stable
 }
 
 
@@ -250,13 +252,16 @@ def invoke_with_role_fallback(
     if selected and selected in ordered:
         ordered = [selected] + [m for m in ordered if m != selected]
     
-    # Explicit model name mapping: if a candidate is known to be decommissioned,
-    # automatically redirect to the fallback (without failing first)
+    # Gold Standard Model Alias Resolution: Prevent "Model Drift" by checking
+    # _MODEL_ALIASES before attempting any API call. If a model is known retired,
+    # auto-redirect to fallback WITHOUT failing first.
+    # This ensures zero downtime even if config.py still references old model IDs.
     mapped_ordered = []
     for model in ordered:
-        if model in _DECOMMISSIONED_MODEL_MAPPING:
-            fallback = _DECOMMISSIONED_MODEL_MAPPING[model]
-            print(f"[{role}] Model '{model}' is decommissioned. Auto-redirecting to '{fallback}'")
+        if model in _MODEL_ALIASES:
+            fallback = _MODEL_ALIASES[model]
+            if fallback != model:  # Only log if actually redirecting (not just upgrading)
+                print(f"[{role}] Model '{model}' is deprecated. Auto-redirecting to '{fallback}'")
             if fallback not in mapped_ordered:  # Avoid duplicates
                 mapped_ordered.append(fallback)
         else:
