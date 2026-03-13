@@ -135,24 +135,37 @@ def testgen_node(state: AgentState) -> dict:
     
     context_str = "\n\n".join(context_parts) if context_parts else "(no context)"
     
-    # Build prompt
-    user_prompt = f"""{issue_text}
+    # Build prompt with emphasis on test-driven validation
+    user_prompt = f"""GitHub Issue to Reproduce:
+{issue_text}
 
 ## Repository Context
 {context_str}
 
 {framework_instructions}
 
+## Critical: Test-Driven Validation
+This test is CRITICAL to the fix process:
+1. It MUST fail with the current code (reproduce the issue)
+2. It will be run BEFORE the Coder attempts any fixes
+3. After the fix is applied, it MUST pass
+4. This ensures the fix actually solves the bug
+
+For attribute access errors (e.g., AttributeError on optional fields):
+- Create a mock/test case that has MISSING attributes
+- This will trigger the exact error from the issue
+- Example: Create a Stripe LineItem WITHOUT a subscription_item field
+
 Remember: The test MUST fail with the current code and PASS after the fix is applied."""
     
     messages = [
-        SystemMessage(content="You are a test generation expert. Write concise, focused tests that expose the bug described in the issue."),
+        SystemMessage(content="You are a test generation expert. Write concise, focused reproduction tests that expose the bug described in the issue. The test drives the entire fix process."),
         HumanMessage(content=user_prompt),
     ]
     
     # Estimate tokens and calculate max_tokens
     estimated_input_tokens = (len(user_prompt) + 500) // 4  # 500 chars buffer for system prompt
-    first_model = TESTGEN_MODEL_CANDIDATES[0] if TESTGEN_MODEL_CANDIDATES else "qwen-2.5-coder-32b"
+    first_model = TESTGEN_MODEL_CANDIDATES[0] if TESTGEN_MODEL_CANDIDATES else "llama-3.3-70b-versatile"
     max_tokens = calculate_max_tokens(first_model, estimated_input_tokens)
     
     try:
@@ -216,7 +229,8 @@ Remember: The test MUST fail with the current code and PASS after the fix is app
     test_filename = test_file_map.get(language, "test_issue_fix.py")
     test_file_path = f"{repo_root}/{test_filename}"
     
-    print(f"[TestGen] Test file path: {test_file_path}")
+    print(f"[TestGen] [TEST-DRIVEN] Test file: {test_filename}")  
+    print(f"[TestGen] [TEST-DRIVEN] This test will determine if the fix works.")
     
     return {
         "test_code": test_code,

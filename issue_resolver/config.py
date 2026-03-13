@@ -29,7 +29,7 @@ SUPERVISOR_MODEL_CANDIDATES: list[str] = _parse_model_list(
     "GROQ_SUPERVISOR_MODELS",
     [
         "llama-3.3-70b-versatile",  # High reasoning: routing between nodes and detecting completion
-        "qwen-2.5-coder-32b",  # fallback
+        "mixtral-8x7b-32768",  # Fallback: solid reasoning
     ],
 )
 RESEARCHER_MODEL_CANDIDATES: list[str] = _parse_model_list(
@@ -42,15 +42,15 @@ RESEARCHER_MODEL_CANDIDATES: list[str] = _parse_model_list(
 CODER_MODEL_CANDIDATES: list[str] = _parse_model_list(
     "GROQ_CODER_MODELS",
     [
-        "qwen-2.5-coder-32b",  # Best-in-class for SEARCH/REPLACE format and surgical edits
-        "llama-3.3-70b-versatile",  # strong fallback
+        "llama-3.3-70b-versatile",  # Strong for SEARCH/REPLACE surgical edits
+        "mixtral-8x7b-32768",  # Fallback: solid code generation (32K context)
     ],
 )
 TESTGEN_MODEL_CANDIDATES: list[str] = _parse_model_list(
     "GROQ_TESTGEN_MODELS",
     [
-        "qwen-2.5-coder-32b",  # Best-in-class for syntactically correct Python/Stripe mock tests
-        "llama-3.3-70b-versatile",  # fallback
+        "llama-3.3-70b-versatile",  # Strong reasoning for complex Stripe mock test generation
+        "mixtral-8x7b-32768",  # Fallback: capable test generation (32K context)
     ],
 )
 REVIEWER_MODEL_CANDIDATES: list[str] = _parse_model_list(
@@ -73,9 +73,10 @@ CODER_MAX_RETRIES: int = int(os.environ.get("CODER_MAX_RETRIES", "1"))
 # Dynamic token allocation for Coder
 # Maps model name to context window size (in tokens)
 GROQ_CONTEXT_WINDOWS: dict[str, int] = {
-    "qwen-2.5-coder-32b": 32768,
     "llama-3.3-70b-versatile": 8192,
+    "mixtral-8x7b-32768": 32768,
     "llama-3.1-8b-instant": 8192,
+    "qwen-2.5-coder-32b": 32768,  # Legacy/if re-enabled
 }
 
 CODER_MAX_OUTPUT_RATIO: float = float(os.environ.get("CODER_MAX_OUTPUT_RATIO", "0.3"))
@@ -96,8 +97,8 @@ GROQ_TPM_LIMIT: int = int(os.environ.get("GROQ_TPM_LIMIT", "6000"))
 PLANNER_MODEL_CANDIDATES: list[str] = _parse_model_list(
     "GROQ_PLANNER_MODELS",
     [
-        "llama-3.3-70b-versatile",  # strong reasoning for strategy
-        "qwen-2.5-coder-32b",  # fallback for planning
+        "llama-3.3-70b-versatile",  # Strong reasoning for high-level architectural strategy (CRITICAL)
+        "mixtral-8x7b-32768",  # Fallback: capable planning
     ],
 )
 TESTGEN_MODEL_CANDIDATES: list[str] = _parse_model_list(

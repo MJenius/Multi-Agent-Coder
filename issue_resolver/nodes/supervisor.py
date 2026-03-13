@@ -46,6 +46,7 @@ def supervisor_node(state: AgentState) -> dict:
     file_context = state.get("file_context", [])
     plan = state.get("plan", "")
     test_code = state.get("test_code", "")
+    test_runs_initially = state.get("test_runs_initially", None)
     proposed_fix = state.get("proposed_fix", "")
     errors = state.get("errors", "")
     validation_status = state.get("validation_status", "")
@@ -113,8 +114,8 @@ def supervisor_node(state: AgentState) -> dict:
 
     # NEW: Test validation guard (Phase 5 test-driven topology)
     # After test is generated, validate it runs (to reproduce the issue)
-    if test_code and not isinstance(test_runs_initially, str):
-        # test_runs_initially is a bool, not yet validated
+    if test_code and test_runs_initially is None:
+        # test_runs_initially not yet set means validator hasn't run
         print("[Supervisor] [GUARD] Test generated but not yet validated. Routing to test_validator.")
         return {"next_step": "test_validator", "iterations": iterations + 1}
 

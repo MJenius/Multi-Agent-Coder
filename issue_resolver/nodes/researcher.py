@@ -266,12 +266,13 @@ def _extract_keywords_from_issue(issue_text: str) -> list[str]:
     """Extract searchable identifiers and technical terms from issue text.
 
     Strategy (in priority order):
-      1. Identifiers from code blocks: `subscription_item`, `item.subscription_item`, etc.
-      2. Backtick-wrapped identifiers: `isMobilePhone`, `calculate_total()`
-      3. snake_case and camelCase names in prose (includes 4+ char mixed case)
-      4. All-caps abbreviations from the title: UTF, ECI, HTTP, URL
-      5. Hyphenated technical terms from the title: UTF-8, ISO-8859, Base64
-      6. Meaningful words (>=5 chars) from the title as last-resort search seeds
+      1. Identifiers from "To Reproduce" section code blocks (HIGHEST priority)
+      2. Identifiers from all code blocks: `subscription_item`, `item.subscription_item`, etc.
+      3. Backtick-wrapped identifiers: `isMobilePhone`, `calculate_total()`
+      4. snake_case and camelCase names in prose (includes 4+ char mixed case)
+      5. All-caps abbreviations from the title: UTF, ECI, HTTP, URL
+      6. Hyphenated technical terms from the title: UTF-8, ISO-8859, Base64
+      7. Meaningful words (>=5 chars) from the title as last-resort search seeds
     """
     _STOP_WORDS = {
         'always', 'using', 'encode', 'should', 'would', 'could', 'there',
@@ -281,7 +282,26 @@ def _extract_keywords_from_issue(issue_text: str) -> list[str]:
 
     keywords: list[str] = []
 
-    # 0. Extract identifiers from code blocks (PRE-CALL: highest priority)
+    # 0A. Extract identifiers from "To Reproduce" section FIRST (HIGHEST priority)
+    # This section often has concrete code that demonstrates the bug
+    repro_match = re.search(
+        r'(?:##\s+)?(?:To Reproduce|Steps to reproduce|Reproduction Steps|REPRO):?\n(.*?)(?:\n##|$)',
+        issue_text,
+        re.IGNORECASE | re.DOTALL
+    )
+    if repro_match:
+        repro_section = repro_match.group(1)
+        # Extract all code blocks from repro section
+        code_block_pattern = r'```(?:python|javascript|java|csharp|cs|js|py)?\n(.*?)```'
+        for code_block in re.findall(code_block_pattern, repro_section, re.DOTALL):
+            identifiers = re.findall(r'\b([a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)*)\b', code_block, re.IGNORECASE)
+            for identifier in identifiers:
+                parts = identifier.split('.')
+                for part in parts:
+                    if 4 <= len(part) <= 20 and part.lower() not in _STOP_WORDS and part not in keywords:
+                        keywords.append(part)
+
+    # 0B. Extract identifiers from code blocks in rest of issue
     # Matches: ```python ... item.subscription_item ... ```
     code_block_pattern = r'```(?:python|javascript|java|csharp|cs|js|py)?\n(.*?)```'
     for code_block in re.findall(code_block_pattern, issue_text, re.DOTALL):
