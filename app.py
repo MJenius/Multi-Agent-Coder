@@ -4,6 +4,7 @@ import shutil
 import git
 from issue_resolver.graph import app as agent_graph
 from issue_resolver.utils.github_utils import fetch_issue_details, submit_pull_request
+from issue_resolver.utils.issue_utils import extract_critical_sections
 from issue_resolver.config import SANDBOX_WORKSPACE_DIR
 
 import stat
@@ -72,6 +73,11 @@ if st.button("🚀 Start Resolution Process"):
                 # Use empty string when body is None to avoid the literal text "None" reaching the LLM
                 body_text = body if body else ""
                 issue_content = f"Title: {title}\n\nBody: {body_text}"
+                
+                # Phase 3B: Apply smart context management to preserve critical sections
+                # This prevents stack traces and "To Reproduce" sections from being lost
+                issue_content = extract_critical_sections(issue_content, max_length=4000)
+                
                 issue_content += "\n\nCRITICAL INSTRUCTION: The repository code is located strictly inside the './sandbox_workspace' directory. Do not search the root directory '.'"
             except Exception as e:
                 st.error(f"Error fetching issue: {e}")

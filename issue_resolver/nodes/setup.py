@@ -7,7 +7,7 @@ from typing import Any
 
 from issue_resolver.runtime_context import set_environment_config
 from issue_resolver.state import AgentState
-from issue_resolver.tools.repo_tools import IGNORE_DIRS, generate_symbol_map
+from issue_resolver.tools.repo_tools import IGNORE_DIRS, _generate_symbol_map_impl
 from issue_resolver.utils.logger import append_to_history
 
 
@@ -157,7 +157,8 @@ def setup_node(state: AgentState) -> dict:
     set_environment_config(env_config)
     
     # Generate symbol map for Planner context (capped at 100 symbols)
-    symbol_map = generate_symbol_map(str(root))
+    # Use internal implementation to avoid StructuredTool wrapping issues
+    symbol_map = _generate_symbol_map_impl(str(root))
     
     history_msg = f"Detected {env_type} (framework={env_config['test_framework']})"
     if len(symbol_map) > 20:  # Non-empty symbol map

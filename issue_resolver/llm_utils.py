@@ -23,6 +23,7 @@ from issue_resolver.config import (
 )
 
 _SELECTED_MODEL_BY_ROLE: dict[str, str] = {}
+_DECOMMISSIONED_MODELS: set[str] = {}  # Models removed due to 400 errors (decommissioned)
 
 
 def calculate_max_tokens(
@@ -85,6 +86,30 @@ def _is_model_unavailable(exc: Exception) -> bool:
     return "model" in text and any(marker in text for marker in markers)
 
 
+def _is_model_decommissioned(exc: Exception) -> bool:
+    """Detect permanent model decommissioning (400 error, invalid request).
+    
+    When a model is decommissioned, the API returns a 400 Bad Request error.
+    This is permanent and cannot be recovered with retry/fallback to the same model.
+    The model should be removed from session candidates to avoid repeated failures.
+    """
+    text = str(exc).lower()
+    
+    # Detect 400 Bad Request errors
+    decommission_markers = (
+        "400",
+        "bad request",
+        "invalid request",
+        "model.*does not exist",
+        "model.*unavailable",
+        "model.*deprecated",
+        "model.*retired",
+    )
+    
+    is_bad_request = any(marker in text for marker in decommission_markers)
+    return is_bad_request
+
+
 def _invoke_with_backoff(llm: Any, messages: list[Any], role: str) -> Any:
     delay = LLM_BACKOFF_INITIAL_SECONDS
     last_exc: Exception | None = None
@@ -114,13 +139,30 @@ def invoke_with_role_fallback(
     max_tokens: int | None = None,
     tools: list[Any] | None = None,
 ) -> tuple[Any, str]:
-    """Invoke Groq model with role-level fallback and transient retry handling."""
+    """Invoke Groq model with role-level fallback and resilient handling.
+    
+    Features:
+    - Role-level model persistence (remembers which model worked for a role)
+    - Fallback to next candidate on any error
+    - Adaptive downscaling: removes permanently decommissioned models (400 errors)
+    - Transient error retry with exponential backoff
+    """
     if ChatGroq is None:
         raise RuntimeError("langchain-groq is not installed")
     if not GROQ_API_KEY:
         raise RuntimeError("GROQ_API_KEY is not configured")
 
-    ordered = list(dict.fromkeys(candidates))
+    # Filter out decommissioned models (Phase 4: adaptive downscaling)
+    available_candidates = [m for m in candidates if m not in _DECOMMISSIONED_MODELS]
+    if not available_candidates:
+        if _DECOMMISSIONED_MODELS:
+            raise RuntimeError(
+                f"{role}: all model candidates have been decommissioned: {_DECOMMISSIONED_MODELS}. "
+                "Please update model configuration in config.py"
+            )
+        raise RuntimeError(f"{role}: no model candidates configured")
+
+    ordered = list(dict.fromkeys(available_candidates))
     selected = _SELECTED_MODEL_BY_ROLE.get(role)
     if selected and selected in ordered:
         ordered = [selected] + [m for m in ordered if m != selected]
@@ -140,9 +182,23 @@ def invoke_with_role_fallback(
             return response, model_name
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
+            
+            # Phase 4: Detect permanent decommissioning (400 error)
+            if _is_model_decommissioned(exc):
+                print(f"[{role}] [DECOMMISSIONED] Model '{model_name}' is permanently unavailable (400 error)")
+                print(f"[{role}] [DECOMMISSIONED] Removing from session candidates: {model_name}")
+                _DECOMMISSIONED_MODELS.add(model_name)
+                # Clear selected model cache if this model was selected
+                if _SELECTED_MODEL_BY_ROLE.get(role) == model_name:
+                    del _SELECTED_MODEL_BY_ROLE[role]
+                continue  # Try next candidate
+            
+            # Detect temporary unavailability or unsupported model errors
             if _is_model_unavailable(exc):
-                print(f"[{role}] [FALLBACK] model '{model_name}' unavailable: {exc}")
+                print(f"[{role}] [FALLBACK] model '{model_name}' temporarily unavailable: {exc}")
                 continue
+            
+            # For other errors, re-raise (transient errors will be retried in _invoke_with_backoff)
             raise
 
     if last_exc is None:

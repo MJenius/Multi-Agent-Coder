@@ -29,29 +29,28 @@ SUPERVISOR_MODEL_CANDIDATES: list[str] = _parse_model_list(
     "GROQ_SUPERVISOR_MODELS",
     [
         "llama-3.3-70b-versatile",
-        "mixtral-8x7b-32768",
+        "qwen-2.5-coder-32b",  # fallback for reasoning tasks
     ],
 )
 RESEARCHER_MODEL_CANDIDATES: list[str] = _parse_model_list(
     "GROQ_RESEARCHER_MODELS",
     [
         "llama-3.3-70b-versatile",
-        "mixtral-8x7b-32768",
+        "qwen-2.5-coder-32b",  # fallback with tool binding support
     ],
 )
 CODER_MODEL_CANDIDATES: list[str] = _parse_model_list(
     "GROQ_CODER_MODELS",
     [
-        "qwen-2.5-coder-32b",
-        "llama-3.3-70b-versatile",
-        "mixtral-8x7b-32768",
+        "qwen-2.5-coder-32b",  # best for code generation
+        "llama-3.3-70b-versatile",  # strong fallback
     ],
 )
 REVIEWER_MODEL_CANDIDATES: list[str] = _parse_model_list(
     "GROQ_REVIEWER_MODELS",
     [
-        "llama-3.1-8b-instant",
-        "llama-3.3-70b-versatile",
+        "llama-3.1-8b-instant",  # fast, sufficient for validation
+        "llama-3.3-70b-versatile",  # stronger fallback
     ],
 )
 
@@ -69,7 +68,6 @@ CODER_MAX_RETRIES: int = int(os.environ.get("CODER_MAX_RETRIES", "1"))
 GROQ_CONTEXT_WINDOWS: dict[str, int] = {
     "qwen-2.5-coder-32b": 32768,
     "llama-3.3-70b-versatile": 8192,
-    "mixtral-8x7b-32768": 32768,
     "llama-3.1-8b-instant": 8192,
 }
 
@@ -91,15 +89,15 @@ GROQ_TPM_LIMIT: int = int(os.environ.get("GROQ_TPM_LIMIT", "6000"))
 PLANNER_MODEL_CANDIDATES: list[str] = _parse_model_list(
     "GROQ_PLANNER_MODELS",
     [
-        "llama-3.3-70b-versatile",
-        "mixtral-8x7b-32768",
+        "llama-3.3-70b-versatile",  # strong reasoning for strategy
+        "qwen-2.5-coder-32b",  # fallback for planning
     ],
 )
 TESTGEN_MODEL_CANDIDATES: list[str] = _parse_model_list(
     "GROQ_TESTGEN_MODELS",
     [
-        "qwen-2.5-coder-32b",
-        "llama-3.3-70b-versatile",
+        "qwen-2.5-coder-32b",  # best for test generation
+        "llama-3.3-70b-versatile",  # fallback
     ],
 )
 

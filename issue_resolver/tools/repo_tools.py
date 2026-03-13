@@ -580,16 +580,11 @@ def get_symbol_definition(symbol: str, directory: str) -> str:
 # ---------------------------------------------------------------------------
 # Tool 6 -- generate_symbol_map
 # ---------------------------------------------------------------------------
-@tool
-@with_timeout(20)
-def generate_symbol_map(directory: str) -> str:
-    """Generate a symbol-level map (classes, functions, methods) with line numbers.
+def _generate_symbol_map_impl(directory: str) -> str:
+    """Internal implementation of symbol map generation.
     
-    Uses regex to extract function/class definitions from all code files.
-    Returns tab-separated entries: symbol_name | line_number | type | file
-    
-    Useful for Planner to understand repo structure without reading full files.
-    Capped at 100 symbols to avoid overwhelming context.
+    This is the core logic extracted to allow direct calls from setup_node
+    without dealing with @tool decoration wrapping.
     
     Args:
         directory: Root directory to scan.
@@ -668,6 +663,26 @@ def generate_symbol_map(directory: str) -> str:
         formatted.append(f"{name:40} | {line:5} | {sym_type:10} | {file}")
     
     return "\n".join(formatted)
+
+
+@tool
+@with_timeout(20)
+def generate_symbol_map(directory: str) -> str:
+    """Generate a symbol-level map (classes, functions, methods) with line numbers.
+    
+    Uses regex to extract function/class definitions from all code files.
+    Returns tab-separated entries: symbol_name | line_number | type | file
+    
+    Useful for Planner to understand repo structure without reading full files.
+    Capped at 100 symbols to avoid overwhelming context.
+    
+    Args:
+        directory: Root directory to scan.
+    
+    Returns:
+        Tab-separated symbol list, or error message if generation fails.
+    """
+    return _generate_symbol_map_impl(directory)
 
 
 # ---------------------------------------------------------------------------
