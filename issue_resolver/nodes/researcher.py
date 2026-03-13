@@ -252,11 +252,12 @@ def _extract_keywords_from_issue(issue_text: str) -> list[str]:
     """Extract searchable identifiers and technical terms from issue text.
 
     Strategy (in priority order):
-      1. Backtick-wrapped identifiers: `isMobilePhone`, `calculate_total()`
-      2. camelCase/PascalCase names in prose (>=6 chars, mixed case)
-      3. All-caps abbreviations from the title: UTF, ECI, HTTP, URL
-      4. Hyphenated technical terms from the title: UTF-8, ISO-8859, Base64
-      5. Meaningful words (>=5 chars) from the title as last-resort search seeds
+      1. Identifiers from code blocks: `subscription_item`, `item.subscription_item`, etc.
+      2. Backtick-wrapped identifiers: `isMobilePhone`, `calculate_total()`
+      3. snake_case and camelCase names in prose (includes 4+ char mixed case)
+      4. All-caps abbreviations from the title: UTF, ECI, HTTP, URL
+      5. Hyphenated technical terms from the title: UTF-8, ISO-8859, Base64
+      6. Meaningful words (>=5 chars) from the title as last-resort search seeds
     """
     _STOP_WORDS = {
         'always', 'using', 'encode', 'should', 'would', 'could', 'there',
@@ -266,19 +267,36 @@ def _extract_keywords_from_issue(issue_text: str) -> list[str]:
 
     keywords: list[str] = []
 
+    # 0. Extract identifiers from code blocks (PRE-CALL: highest priority)
+    # Matches: ```python ... item.subscription_item ... ```
+    code_block_pattern = r'```(?:python|javascript|java|csharp|cs|js|py)?\n(.*?)```'
+    for code_block in re.findall(code_block_pattern, issue_text, re.DOTALL):
+        # Extract all identifiers from the code block
+        # Matches: variable names, property access (obj.property), method calls
+        identifiers = re.findall(r'\b([a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)*)\b', code_block, re.IGNORECASE)
+        for identifier in identifiers:
+            # Use the full identifier (e.g., "item.subscription_item") or just the property
+            parts = identifier.split('.')
+            for part in parts:
+                # Filter: 4-20 chars, avoid common words
+                if 4 <= len(part) <= 20 and part.lower() not in _STOP_WORDS and part not in keywords:
+                    keywords.append(part)
+
     # 1. Backtick-wrapped identifiers: `isMobilePhone`, `calculate_total()`
     for m in re.findall(r'`([A-Za-z_][A-Za-z0-9_]*(?:\([^)]*\))?)`', issue_text):
         name = m.split('(')[0]
-        if len(name) >= 4 and name.lower() not in _STOP_WORDS:
+        if len(name) >= 4 and name.lower() not in _STOP_WORDS and name not in keywords:
             keywords.append(name)
 
-    # 2. camelCase identifiers in prose (at least 6 chars, must have mixed case)
-    for m in re.findall(r'\b([a-z][a-zA-Z0-9]{5,})\b', issue_text):
-        if any(c.isupper() for c in m) and m not in keywords:
+    # 2. camelCase identifiers in prose (4+ chars, must have mixed case OR contain underscore)
+    # This catches: subscriptionItem, subscription_item, calculateTotal, etc.
+    for m in re.findall(r'\b([a-z_][a-zA-Z0-9_]{3,})\b', issue_text):
+        has_mixed_case = any(c.isupper() for c in m)
+        has_underscore = '_' in m
+        if (has_mixed_case or has_underscore) and m.lower() not in _STOP_WORDS and m not in keywords:
             keywords.append(m)
 
-    # 3-5: Mine the issue title for technical terms when #1 and #2 yield nothing
-    # Extract title line, strip leading "Title: " prefix if present
+    # 3-6: Mine the issue title for technical terms
     title_line = issue_text.splitlines()[0].strip()
     if title_line.lower().startswith("title:"):
         title_line = title_line[6:].strip()
@@ -299,13 +317,21 @@ def _extract_keywords_from_issue(issue_text: str) -> list[str]:
             if m.lower() not in _STOP_WORDS and m.lower() not in {k.lower() for k in keywords}:
                 keywords.append(m)
 
-    # Deduplicate preserving order (case-insensitive)
+    # Deduplicate preserving order (case-insensitive), prioritize shorter, more specific names
     seen: set[str] = set()
     unique: list[str] = []
-    for k in keywords:
+    
+    # Sort by: underscores first (more specific), then length (prefer shorter/simpler)
+    keywords_sorted = sorted(
+        keywords,
+        key=lambda x: (0 if '_' in x else 1, len(x))
+    )
+    
+    for k in keywords_sorted:
         if k.lower() not in seen:
             seen.add(k.lower())
             unique.append(k)
+    
     return unique
 
 

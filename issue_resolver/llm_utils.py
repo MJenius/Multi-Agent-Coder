@@ -29,7 +29,7 @@ from issue_resolver.utils.token_bucket import (
 )
 
 _SELECTED_MODEL_BY_ROLE: dict[str, str] = {}
-_DECOMMISSIONED_MODELS: set[str] = {}  # Models removed due to 400 errors (decommissioned)
+_DECOMMISSIONED_MODELS: set[str] = set()  # Models removed due to 400 errors (decommissioned)
 
 
 def calculate_max_tokens(

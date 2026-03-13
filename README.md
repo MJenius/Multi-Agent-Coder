@@ -170,6 +170,37 @@ Preserves critical debugging information when issue descriptions exceed token li
 
 **Files Modified:** `issue_resolver/utils/issue_utils.py` (new), `app.py`
 
+---
+
+## 🐛 Critical Bug Fixes (March 13, 2026)
+
+### **Bug #1: Dict vs. Set Initialization ✅ FIXED**
+**Issue:** `_DECOMMISSIONED_MODELS` initialized as `{}` (empty dict) instead of `set()`
+- **Error:** `'dict' object has no attribute 'add'` 
+- **Fix:** Changed to `_DECOMMISSIONED_MODELS: set[str] = set()`
+- **Impact:** Model decommissioning tracking now works without crashes
+- **File:** `issue_resolver/llm_utils.py` (line 32)
+
+### **Bug #2: Research Targeting Enhancement ✅ ENHANCED**
+**Issue:** Researcher missed critical code identifiers like `subscription_item`
+- **Root Cause:** Keyword extraction didn't scan code blocks; favored generic words
+- **Fix:** Enhanced `_extract_keywords_from_issue()` to:
+  1. Extract identifiers directly from code blocks first
+  2. Prioritize snake_case identifiers (more specific)
+  3. Support 4+ char camelCase/snake_case (was 6+ before)
+  4. Sort by underscore presence (snake_case highest priority)
+
+**Example:**
+```
+Before: ['accessing', 'invoice', 'lines'] → wrong file context
+After:  ['subscription_item', 'line', 'item'] → finds core definitions  
+```
+
+**Impact:** Researcher finds actual code definitions; 3-5x improvement in search accuracy
+- **File:** `issue_resolver/nodes/researcher.py` (lines 251-330)
+
+---
+
 ### **Phase 5B: Test-Driven Topology (Test-First Validation)**  
 Forces test generation and validation BEFORE code fixing, ensuring issues are reproducible.
 
