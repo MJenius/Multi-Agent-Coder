@@ -28,28 +28,35 @@ GROQ_API_KEY: str = os.environ.get("GROQ_API_KEY", "")
 SUPERVISOR_MODEL_CANDIDATES: list[str] = _parse_model_list(
     "GROQ_SUPERVISOR_MODELS",
     [
-        "llama-3.3-70b-versatile",
-        "qwen-2.5-coder-32b",  # fallback for reasoning tasks
+        "llama-3.3-70b-versatile",  # High reasoning: routing between nodes and detecting completion
+        "qwen-2.5-coder-32b",  # fallback
     ],
 )
 RESEARCHER_MODEL_CANDIDATES: list[str] = _parse_model_list(
     "GROQ_RESEARCHER_MODELS",
     [
-        "llama-3.3-70b-versatile",
-        "qwen-2.5-coder-32b",  # fallback with tool binding support
+        "llama-3.1-8b-instant",  # Fastest: optimal for tool-calling (list_files, read_file, ripgrep)
+        "llama-3.3-70b-versatile",  # fallback for complex structure navigation
     ],
 )
 CODER_MODEL_CANDIDATES: list[str] = _parse_model_list(
     "GROQ_CODER_MODELS",
     [
-        "qwen-2.5-coder-32b",  # best for code generation
+        "qwen-2.5-coder-32b",  # Best-in-class for SEARCH/REPLACE format and surgical edits
         "llama-3.3-70b-versatile",  # strong fallback
+    ],
+)
+TESTGEN_MODEL_CANDIDATES: list[str] = _parse_model_list(
+    "GROQ_TESTGEN_MODELS",
+    [
+        "qwen-2.5-coder-32b",  # Best-in-class for syntactically correct Python/Stripe mock tests
+        "llama-3.3-70b-versatile",  # fallback
     ],
 )
 REVIEWER_MODEL_CANDIDATES: list[str] = _parse_model_list(
     "GROQ_REVIEWER_MODELS",
     [
-        "llama-3.1-8b-instant",  # fast, sufficient for validation
+        "llama-3.1-8b-instant",  # Efficient: parsing terminal output and syntax errors
         "llama-3.3-70b-versatile",  # stronger fallback
     ],
 )

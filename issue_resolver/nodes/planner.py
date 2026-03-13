@@ -60,6 +60,21 @@ CRITICAL RULES:
 5. Consider backwards compatibility
 6. DO NOT write code or test syntax - only strategy
 7. Keep it concise (under 300 words) but complete
+
+DEFENSIVE CODING FOR OPTIONAL ATTRIBUTES:
+──────────────────────────────────────────
+When accessing attributes that may not exist on all instances (especially in frameworks like Stripe):
+
+STRATEGY RULE: Always use defensive access patterns in your fix plan:
+  ✅ Recommend: getattr(obj, 'attribute_name', default_value)
+  ✅ Recommend: if hasattr(obj, 'attribute_name'): value = obj.attribute_name
+  ❌ Avoid: Accessing obj.attribute_name directly without checks
+
+Example:
+  - ❌ BAD:  for item in invoice.line_items: total += item.subscription_item.amount
+  - ✅ GOOD: for item in invoice.line_items: sub_item = getattr(item, 'subscription_item', None); if sub_item: total += sub_item.amount
+
+This prevents AttributeError when objects don't have optional fields.
 """
 
 

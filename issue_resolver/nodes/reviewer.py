@@ -70,9 +70,16 @@ def reviewer_node(state: AgentState) -> dict:
       - ``"passed"``       – tests/build ran and succeeded
       - ``"failed"``       – tests/build ran and failed (errors populated)
       - ``"inconclusive"`` – validation could not run (Docker missing, etc.)
+    
+    Test-Driven Validation (Phase 5):
+    - If test_code was generated, validator previously confirmed it FAILS before fix.
+    - After the fix is applied: runs tests and confirms they now PASS.
+    - This ensures the fix is verified against a concrete reproduction case.
     """
     proposed_fix = state.get("proposed_fix", "")
     repo_path = state.get("repo_path", "")
+    test_code = state.get("test_code", "")
+    test_file_path = state.get("test_file_path", "")
 
     if not proposed_fix:
         print("[Reviewer] [WARN] No proposed fix found in state.")
@@ -86,6 +93,13 @@ def reviewer_node(state: AgentState) -> dict:
         # 1. Apply the diff
         print("[Reviewer] Applying proposed fix in the sandbox...")
         patch_output = apply_diff_in_sandbox(proposed_fix, repo_path)
+        
+        # Test-Driven Validation (Phase 5):
+        # The test was already verified to FAIL before the fix (by TestValidator).
+        # Now we apply the fix and run tests to confirm they PASS.
+        if test_code and test_file_path:
+            print(f"[Reviewer] [TEST-DRIVEN] Test file '{test_file_path}' will be validated after fix is applied.")
+            print("[Reviewer] [TEST-DRIVEN] If the test now passes, the fix resolves the issue.")
 
         if "Error" in patch_output:
             if "Sandbox container not found" in patch_output:
