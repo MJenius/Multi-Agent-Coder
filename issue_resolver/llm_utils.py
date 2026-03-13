@@ -94,27 +94,39 @@ def _is_model_unavailable(exc: Exception) -> bool:
 
 
 def _is_model_decommissioned(exc: Exception) -> bool:
-    """Detect permanent model decommissioning (400 error, invalid request).
+    """Detect permanent model decommissioning (specific API errors only).
     
-    When a model is decommissioned, the API returns a 400 Bad Request error.
-    This is permanent and cannot be recovered with retry/fallback to the same model.
-    The model should be removed from session candidates to avoid repeated failures.
+    CRITICAL: Distinguish between:
+    - Permanent decommissioning (model retired/removed) → return True
+    - Transient 400 errors (context window, token limit, rate limit) → return False
+    
+    A 400 Bad Request can occur for many reasons (token overflow, tier limits, etc.).
+    Only treat as decommissioning if the error explicitly mentions:
+    - Model not found / does not exist
+    - Model deprecated / retired / discontinued
+    - Permission denied for this model (API key limitations)
+    
+    Token/context window overflows are NOT decommissioning - they're transient.
     """
     text = str(exc).lower()
     
-    # Detect 400 Bad Request errors
-    decommission_markers = (
-        "400",
-        "bad request",
-        "invalid request",
-        "model.*does not exist",
-        "model.*unavailable",
-        "model.*deprecated",
+    # ONLY these specific markers indicate permanent decommissioning
+    # NOT just any "400" error, as those can be transient (token overflow, tier limits)
+    permanent_markers = (
+        "model not found",
+        "model_not_found",
+        "does not exist",
         "model.*retired",
+        "model.*deprecated",
+        "model.*discontinued",
+        "permission denied",
+        "not authorized",
+        "invalid model",
     )
     
-    is_bad_request = any(marker in text for marker in decommission_markers)
-    return is_bad_request
+    # Check for actual model decommissioning, not generic 400 errors
+    is_permanently_unavailable = any(marker in text for marker in permanent_markers)
+    return is_permanently_unavailable
 
 
 def _is_quota_exceeded(exc: Exception) -> bool:
@@ -149,6 +161,15 @@ def _is_quota_exceeded(exc: Exception) -> bool:
 
 
 def _invoke_with_backoff(llm: Any, messages: list[Any], role: str) -> Any:
+    """Invoke LLM with backoff for transient errors, but NOT for quota exhaustion.
+    
+    CRITICAL: TPD (Tokens Per Day) quota errors are NOT transient.
+    They should NOT trigger backoff/retry; instead, they should fail immediately
+    so invoke_with_role_fallback can rotate to a different model.
+    
+    Transient errors (429 TPM, timeouts, etc.) DO get retry + backoff.
+    Quota errors (429 TPD) should fail fast for model rotation.
+    """
     delay = LLM_BACKOFF_INITIAL_SECONDS
     last_exc: Exception | None = None
 
@@ -157,6 +178,14 @@ def _invoke_with_backoff(llm: Any, messages: list[Any], role: str) -> Any:
             return llm.invoke(messages)
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
+            
+            # CRITICAL: Do NOT retry TPD quota exhaustion errors
+            # These need immediate model rotation, not backoff
+            if _is_quota_exceeded(exc):
+                print(f"[{role}] [NO_RETRY] TPD quota exhausted - skipping backoff for immediate rotation")
+                raise
+            
+            # For other errors, check if they're transient
             if not _is_transient_error(exc) or attempt >= max(1, LLM_MAX_ATTEMPTS):
                 raise
             print(f"[{role}] [RETRY] transient LLM error on attempt {attempt}: {exc}")
