@@ -29,28 +29,30 @@ SUPERVISOR_MODEL_CANDIDATES: list[str] = _parse_model_list(
     "GROQ_SUPERVISOR_MODELS",
     [
         "llama-3.3-70b-versatile",  # High reasoning: routing between nodes and detecting completion
-        "mixtral-8x7b-32768",  # Fallback: solid reasoning
+        "llama-3.1-70b-versatile",  # Fallback: strong reasoning, widely available
     ],
 )
 RESEARCHER_MODEL_CANDIDATES: list[str] = _parse_model_list(
     "GROQ_RESEARCHER_MODELS",
     [
-        "llama-3.1-8b-instant",  # Fastest: optimal for tool-calling (list_files, read_file, ripgrep)
-        "llama-3.3-70b-versatile",  # fallback for complex structure navigation
+        "llama-3.1-8b-instant",  # Optimal: fastest for tool-calling (list_files, search_code, read_file)
+        "llama-3.3-70b-versatile",  # Fallback: strong reasoning for complex code navigation
     ],
 )
 CODER_MODEL_CANDIDATES: list[str] = _parse_model_list(
     "GROQ_CODER_MODELS",
     [
-        "llama-3.3-70b-versatile",  # Strong for SEARCH/REPLACE surgical edits
-        "mixtral-8x7b-32768",  # Fallback: solid code generation (32K context)
+        "llama-3.3-70b-versatile",  # High reasoning for complex SEARCH/REPLACE edits
+        "llama-3.1-70b-versatile",  # Fallback: strong code understanding
+        "llama-3.1-8b-instant",  # Ultra-fast fallback for surgical fixes
     ],
 )
 TESTGEN_MODEL_CANDIDATES: list[str] = _parse_model_list(
     "GROQ_TESTGEN_MODELS",
     [
-        "llama-3.3-70b-versatile",  # Strong reasoning for complex Stripe mock test generation
-        "mixtral-8x7b-32768",  # Fallback: capable test generation (32K context)
+        "llama-3.3-70b-versatile",  # High reasoning for complex mock test generation (critical for Stripe)
+        "llama-3.1-70b-versatile",  # Fallback: capable test generation
+        "llama-3.1-8b-instant",  # Fast fallback for simple test generation
     ],
 )
 REVIEWER_MODEL_CANDIDATES: list[str] = _parse_model_list(
@@ -74,9 +76,8 @@ CODER_MAX_RETRIES: int = int(os.environ.get("CODER_MAX_RETRIES", "1"))
 # Maps model name to context window size (in tokens)
 GROQ_CONTEXT_WINDOWS: dict[str, int] = {
     "llama-3.3-70b-versatile": 8192,
-    "mixtral-8x7b-32768": 32768,
+    "llama-3.1-70b-versatile": 8192,
     "llama-3.1-8b-instant": 8192,
-    "qwen-2.5-coder-32b": 32768,  # Legacy/if re-enabled
 }
 
 CODER_MAX_OUTPUT_RATIO: float = float(os.environ.get("CODER_MAX_OUTPUT_RATIO", "0.3"))
@@ -97,8 +98,8 @@ GROQ_TPM_LIMIT: int = int(os.environ.get("GROQ_TPM_LIMIT", "6000"))
 PLANNER_MODEL_CANDIDATES: list[str] = _parse_model_list(
     "GROQ_PLANNER_MODELS",
     [
-        "llama-3.3-70b-versatile",  # Strong reasoning for high-level architectural strategy (CRITICAL)
-        "mixtral-8x7b-32768",  # Fallback: capable planning
+        "llama-3.3-70b-versatile",  # High reasoning for architectural strategy and defensive patterns (CRITICAL)
+        "llama-3.1-70b-versatile",  # Fallback: strong planning capability
     ],
 )
 TESTGEN_MODEL_CANDIDATES: list[str] = _parse_model_list(

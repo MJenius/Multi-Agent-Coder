@@ -68,13 +68,21 @@ When accessing attributes that may not exist on all instances (especially in fra
 STRATEGY RULE: Always use defensive access patterns in your fix plan:
   ✅ Recommend: getattr(obj, 'attribute_name', default_value)
   ✅ Recommend: if hasattr(obj, 'attribute_name'): value = obj.attribute_name
+  ✓ Alternative: try/except AttributeError blocks for attribute access
   ❌ Avoid: Accessing obj.attribute_name directly without checks
+
+STRIPE-SPECIFIC PATTERN (LineItem optional attributes):
+Stripe LineItem objects may or may not have fields like subscription_item, invoice_item, etc.
 
 Example:
   - ❌ BAD:  for item in invoice.line_items: total += item.subscription_item.amount
-  - ✅ GOOD: for item in invoice.line_items: sub_item = getattr(item, 'subscription_item', None); if sub_item: total += sub_item.amount
+           (fails if item lacks subscription_item)
+  - ✅ GOOD: for item in invoice.line_items: 
+             sub_item = getattr(item, 'subscription_item', None)
+             if sub_item: 
+                 total += sub_item.amount
 
-This prevents AttributeError when objects don't have optional fields.
+This prevents AttributeError when Stripe objects don't have optional fields.
 """
 
 

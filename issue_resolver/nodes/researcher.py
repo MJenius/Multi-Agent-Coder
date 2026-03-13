@@ -351,14 +351,15 @@ def _extract_keywords_from_issue(issue_text: str) -> list[str]:
             if m.lower() not in _STOP_WORDS and m.lower() not in {k.lower() for k in keywords}:
                 keywords.append(m)
 
-    # Deduplicate preserving order (case-insensitive), prioritize shorter, more specific names
+    # Deduplicate preserving order (case-insensitive), prioritize LONGER unique identifiers
     seen: set[str] = set()
     unique: list[str] = []
     
-    # Sort by: underscores first (more specific), then length (prefer shorter/simpler)
+    # IMPROVED SORTING: Prioritize unique, longer identifiers over short common words
+    # Sort by: underscores first (more specific), then LENGTH DESCENDING (longer = more unique)
     keywords_sorted = sorted(
         keywords,
-        key=lambda x: (0 if '_' in x else 1, len(x))
+        key=lambda x: (0 if '_' in x else 1, -len(x))  # Longer words first (more unique)
     )
     
     for k in keywords_sorted:
@@ -600,7 +601,7 @@ def researcher_node(state: AgentState) -> dict:
                     result = search_code.invoke({"query": keyword, "directory": repo_path})
                     if not result.startswith("No matches"):
                         match_count = len([l for l in result.split('\n') if l.strip() and ':' in l and not l.startswith('[')])
-                        print(f"[Researcher] ✅ Auto-search '{keyword}' (fallback): {match_count} match(es)")
+                        print(f"[Researcher] ✅ Auto-search '{keyword}': {match_count} match(es)")
                         
                         # Auto-read the most relevant file from results
                         top_file = _get_top_file_from_search(result)
@@ -621,7 +622,31 @@ def researcher_node(state: AgentState) -> dict:
                                 )
                                 break  # Got what we need
                     else:
-                        print(f"[Researcher] ❌ Auto-search '{keyword}': no matches (ripgrep + fallback)")
+                        # No matches with standard search either
+                        # Iterative Discovery: Try broader search scope at root if directory didn't work
+                        print(f"[Researcher] ❌ Auto-search '{keyword}': no matches in {repo_path}")
+                        if repo_path != ".":
+                            print(f"[Researcher] 🔄 Retrying search at root directory (.)")
+                            result = search_code.invoke({"query": keyword, "directory": "."})
+                            if not result.startswith("No matches"):
+                                match_count = len([l for l in result.split('\n') if l.strip() and ':' in l and not l.startswith('[')])
+                                print(f"[Researcher] ✅ Root search '{keyword}': {match_count} match(es)")
+                                
+                                top_file = _get_top_file_from_search(result)
+                                if top_file:
+                                    file_path = str((Path(repo_path) / top_file.replace('\\', '/')).resolve())
+                                    file_result = read_file.invoke({"file_path": file_path})
+                                    if not file_result.startswith("Error"):
+                                        lines_in_file = file_result.count("\n")
+                                        print(f"[Researcher] ✅ Auto-read '{top_file}' ({lines_in_file} lines)")
+                                        snippet = f"# --- file: {top_file} ---\n{file_result}"
+                                        snippets.append(snippet)
+                                        files_read += 1
+                                        total_lines += lines_in_file + 1
+                                        history_additions.extend(
+                                            append_to_history("Researcher", "Auto-Read (Root)", f"✅ {top_file} ({lines_in_file} lines)")
+                                        )
+                                        break
                 except Exception as e:
                     print(f"[Researcher] ⚠ Auto-search error for '{keyword}': {e}")
     

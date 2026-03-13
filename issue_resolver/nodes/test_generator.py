@@ -156,10 +156,28 @@ For attribute access errors (e.g., AttributeError on optional fields):
 - This will trigger the exact error from the issue
 - Example: Create a Stripe LineItem WITHOUT a subscription_item field
 
+STRIPE-SPECIFIC MOCKING (using unittest.mock.MagicMock):
+──────────────────────────────────────────────────────
+```python
+from unittest.mock import MagicMock
+
+# Create a LineItem mock WITHOUT subscription_item attribute
+line_item = MagicMock(spec=['id', 'amount', 'description'])  # subscription_item NOT included
+# Using spec ensures ONLY listed attributes exist
+
+# Or use side_effect to explicitly raise AttributeError:
+line_item = MagicMock()
+del line_item.subscription_item  # Ensure attribute doesn't exist
+
+# Test should try to access the missing attribute:
+with pytest.raises(AttributeError):
+    value = line_item.subscription_item  # This is what fails in the bug
+```
+
 Remember: The test MUST fail with the current code and PASS after the fix is applied."""
     
     messages = [
-        SystemMessage(content="You are a test generation expert. Write concise, focused reproduction tests that expose the bug described in the issue. The test drives the entire fix process."),
+        SystemMessage(content="You are a test generation expert. Write concise, focused reproduction tests that expose the bug described in the issue. The test drives the entire fix process. For Stripe/API objects with optional attributes, use unittest.mock.MagicMock with explicit spec to create objects missing optional fields—this triggers AttributeError bugs."),
         HumanMessage(content=user_prompt),
     ]
     
