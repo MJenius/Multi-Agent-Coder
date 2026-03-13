@@ -55,6 +55,7 @@ def main() -> None:
         "next_step": "",
         "iterations": 0,
         "is_resolved": False,
+        "environment_config": {},
         "contribution_guidelines": "",
         "history": [],
     }

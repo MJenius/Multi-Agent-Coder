@@ -4,6 +4,9 @@ Sandbox tools -- Uses the Docker SDK to interact with the sandbox container.
 
 import os
 import re
+from typing import Any
+
+from issue_resolver.runtime_context import get_environment_config
 
 try:
     import docker
@@ -228,135 +231,213 @@ def _extract_modified_files_from_diff(diff: str) -> list[str]:
     return files
 
 
-def run_tests_in_sandbox(diff: str) -> tuple[bool, str]:
-    """
-    Validates the patch by running a test inside the sandbox.
-    Detects project type (C#, Node.js, Python, etc.) and runs appropriate commands.
-    """
-    sandbox = get_sandbox_container()
-    if not sandbox:
-        return False, "Error: Sandbox container not found."
-
-    # --- 1. C# (.NET) ---
-    check_csproj = sandbox.exec_run(["bash", "-c", "find . -name '*.csproj' | head -1"], workdir="/workspace")
-    if check_csproj.output.strip():
-        print("[Sandbox] Detected C# project (.csproj)")
-
-        # Priority 1: Find test projects (exclude ApiTests which has Windows dependencies)
-        test_find = sandbox.exec_run(
-            ["bash", "-c", "find . -name '*[Tt]est*.csproj' ! -path '*ApiTests*' | grep -v UWP | grep -v Xaml | head -1"],
-            workdir="/workspace"
+def parse_dotnet_error_trace(output: str) -> dict[str, Any]:
+    """Extract .NET compiler diagnostics including CS code and location."""
+    findings: list[dict[str, Any]] = []
+    pattern = re.compile(
+        r"^(?P<file>.+?)\((?P<line>\d+),(?P<column>\d+)\):\s*error\s*(?P<code>CS\d+)\s*:\s*(?P<msg>.+)$",
+        re.IGNORECASE,
+    )
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        match = pattern.match(line)
+        if not match:
+            continue
+        findings.append(
+            {
+                "file": match.group("file"),
+                "line": int(match.group("line")),
+                "column": int(match.group("column")),
+                "code": match.group("code").upper(),
+                "message": match.group("msg").strip(),
+            }
         )
-        test_proj = test_find.output.decode("utf-8", errors="ignore").strip()
-        
-        if test_proj:
-            # Found a test project — build and run it
-            print(f"[Sandbox] Found test project: {test_proj}")
-            
-            # Build the test project
-            print("[Sandbox] Building test project...")
-            build_res = sandbox.exec_run(["dotnet", "build", test_proj], workdir="/workspace")
-            build_out = build_res.output.decode("utf-8", errors="ignore")
-            
-            if build_res.exit_code != 0:
-                # Check for platform-specific build errors that indicate offline/environment issues
-                if "NETSDK1100" in build_out or "EnableWindowsTargeting" in build_out:
-                    print("[Sandbox] Build skipped (platform-specific Windows dependencies)")
-                    return True, "Build skipped (platform-specific dependencies, but patch is syntactically valid)"
-                # Try with --no-restore for offline containers
-                if "NU1301" in build_out or "Unable to load the service index" in build_out:
-                    print("[Sandbox] NuGet restore failed (offline), retrying with --no-restore...")
-                    build_res = sandbox.exec_run(
-                        ["dotnet", "build", test_proj, "--no-restore"],
-                        workdir="/workspace"
-                    )
-                    build_out = build_res.output.decode("utf-8", errors="ignore")
-                    # If still fails with NuGet errors, treat as success (offline mode)
-                    if "NU1301" in build_out or "Unable to load the service index" in build_out:
-                        print("[Sandbox] Build succeeded (offline mode, NuGet packages unavailable)")
-                        return True, "Build succeeded (offline mode, NuGet packages unavailable)"
-                    if build_res.exit_code != 0:
-                        return False, f"Failed to build test project:\n{build_out}"
-                else:
-                    return False, f"Failed to build test project:\n{build_out}"
-            
-            # Run the tests
-            print(f"[Sandbox] Running tests from {test_proj}...")
-            test_res = sandbox.exec_run(["dotnet", "test", test_proj, "--no-restore", "--no-build", "-v", "normal"], workdir="/workspace")
-            test_out = test_res.output.decode("utf-8", errors="ignore")
-            
-            if test_res.exit_code == 0:
-                return True, test_out
-            else:
-                # Check if failure is due to network/packages only
-                if "NU1301" in test_out or "Unable to load the service index" in test_out:
-                    print("[Sandbox] Tests skipped (offline, NuGet unavailable)")
-                    return True, "Build succeeded. Tests skipped (offline mode, NuGet unavailable)"
-                return False, test_out
-        
-        # Priority 2: No test project found — find and build a core library project
-        print("[Sandbox] No suitable test project found. Attempting to build library projects...")
+
+    return {
+        "type": "dotnet",
+        "count": len(findings),
+        "primary": findings[0] if findings else None,
+        "findings": findings[:10],
+    }
+
+
+def parse_node_error_trace(output: str) -> dict[str, Any]:
+    """Extract NodeJS stack trace focus and likely culprit file."""
+    stack_lines = [
+        line.strip()
+        for line in output.splitlines()
+        if line.strip().startswith("at ") or ".js:" in line or ".ts:" in line
+    ]
+    culprit = None
+    pattern = re.compile(r"(?P<file>[A-Za-z0-9_./\\-]+\.(?:js|ts|tsx|jsx)):(?P<line>\d+)(?::(?P<col>\d+))?")
+    for line in stack_lines:
+        match = pattern.search(line)
+        if match:
+            culprit = {
+                "file": match.group("file"),
+                "line": int(match.group("line")),
+                "column": int(match.group("col")) if match.group("col") else None,
+            }
+            break
+
+    lower = output.lower()
+    signature = "hang" if any(tok in lower for tok in ("timeout", "hang", "hung", "did not exit")) else "error"
+    return {
+        "type": "nodejs",
+        "signature": signature,
+        "culprit": culprit,
+        "stack": stack_lines[:12],
+    }
+
+
+def parse_eslint_error_trace(output: str) -> dict[str, Any]:
+    """Extract eslint file and line diagnostics from lint output."""
+    findings: list[dict[str, Any]] = []
+    pattern = re.compile(
+        r"^(?P<file>[^\s].+?\.(?:js|jsx|ts|tsx)):(?P<line>\d+):(?P<column>\d+):\s*(?P<message>.+?)\s{2,}(?P<rule>[\w@\-/]+)$"
+    )
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        match = pattern.match(line)
+        if not match:
+            continue
+        findings.append(
+            {
+                "file": match.group("file"),
+                "line": int(match.group("line")),
+                "column": int(match.group("column")),
+                "message": match.group("message"),
+                "rule": match.group("rule"),
+            }
+        )
+    return {
+        "type": "eslint",
+        "count": len(findings),
+        "primary": findings[0] if findings else None,
+        "findings": findings[:10],
+    }
+
+
+def parse_python_error_trace(output: str) -> dict[str, Any]:
+    """Extract concise Python failure signal for faster self-repair loops."""
+    failed_tests = [line.strip() for line in output.splitlines() if line.strip().startswith("FAILED ")]
+    assertions = [line.strip() for line in output.splitlines() if "AssertionError" in line or line.strip().startswith("E   ")]
+    return {
+        "type": "python",
+        "failed_tests": failed_tests[:8],
+        "assertions": assertions[:8],
+    }
+
+
+def format_parsed_error_summary(environment_type: str, output: str) -> str:
+    """Return concise, coder-actionable summary from raw test/build output."""
+    if environment_type == "dotnet":
+        parsed = parse_dotnet_error_trace(output)
+        primary = parsed.get("primary")
+        if primary:
+            return (
+                f"Dotnet compile error: {primary['code']} at "
+                f"{primary['file']}:{primary['line']}:{primary['column']} - {primary['message']}"
+            )
+        return "Dotnet validation failed without parseable CSxxxx compiler diagnostics."
+
+    if environment_type == "nodejs":
+        eslint = parse_eslint_error_trace(output)
+        primary_lint = eslint.get("primary")
+        if primary_lint:
+            return (
+                f"ESLint error at {primary_lint['file']}:{primary_lint['line']}:{primary_lint['column']} "
+                f"({primary_lint['rule']}): {primary_lint['message']}"
+            )
+
+        parsed = parse_node_error_trace(output)
+        culprit = parsed.get("culprit")
+        if culprit:
+            return f"Node {parsed['signature']} trace focuses on {culprit['file']}:{culprit['line']}"
+        return f"Node {parsed['signature']} detected without parseable culprit file."
+
+    parsed = parse_python_error_trace(output)
+    if parsed["failed_tests"]:
+        return f"Python test failures: {', '.join(parsed['failed_tests'][:3])}"
+    if parsed["assertions"]:
+        return f"Python assertion highlight: {parsed['assertions'][0]}"
+    return "Python validation failed with no parseable traceback markers."
+
+
+def _run_dotnet_strategy(sandbox) -> tuple[bool, str]:
+    env_config = get_environment_config()
+    framework = str(env_config.get("test_framework", "unknown")).lower()
+
+    test_find = sandbox.exec_run(
+        ["bash", "-c", "find . -name '*[Tt]est*.csproj' ! -path '*ApiTests*' | head -1"],
+        workdir="/workspace",
+    )
+    test_proj = test_find.output.decode("utf-8", errors="ignore").strip()
+
+    if not test_proj:
         find_res = sandbox.exec_run(
-            ["bash", "-c",
-             "find . -name '*.csproj' ! -path '*[Tt]est*' ! -path '*[Dd]emo*' ! -path '*[Cc]onsole*' ! -path '*UWP*' ! -path '*Xaml*' ! -path '*ApiTests*' ! -path '*Benchmark*' ! -path '*Sample*' | head -1"],
-            workdir="/workspace"
+            ["bash", "-c", "find . -name '*.csproj' ! -path '*[Tt]est*' ! -path '*[Dd]emo*' ! -path '*[Cc]onsole*' | head -1"],
+            workdir="/workspace",
         )
         lib_proj = find_res.output.decode("utf-8", errors="ignore").strip()
-        
-        if lib_proj:
-            print(f"[Sandbox] Building library project: {lib_proj}")
-            build_res = sandbox.exec_run(["dotnet", "build", lib_proj], workdir="/workspace")
-            build_out = build_res.output.decode("utf-8", errors="ignore")
-            
-            if build_res.exit_code != 0:
-                # Check for platform-specific errors
-                if "NETSDK1100" in build_out or "EnableWindowsTargeting" in build_out:
-                    print("[Sandbox] Build skipped (platform-specific Windows dependencies)")
-                    return True, "Build skipped (patch is syntactically valid, platform skip)"
-                if "NU1301" in build_out or "Unable to load the service index" in build_out:
-                    print("[Sandbox] NuGet restore failed (offline), retrying with --no-restore...")
-                    build_res = sandbox.exec_run(
-                        ["dotnet", "build", lib_proj, "--no-restore"],
-                        workdir="/workspace"
-                    )
-                    build_out = build_res.output.decode("utf-8", errors="ignore")
-                    # If still fails with NuGet errors, treat as success (offline mode)
-                    if "NU1301" in build_out or "Unable to load the service index" in build_out:
-                        print("[Sandbox] Build succeeded (offline mode, NuGet packages unavailable)")
-                        return True, "Build succeeded (offline mode, NuGet packages unavailable)"
-            
-            if build_res.exit_code != 0:
-                return False, f"Build failed:\n{build_out}"
-            else:
-                return True, f"Build succeeded:\n{build_out}"
-        
-        # Fallback: No suitable projects found
-        return False, "Error: No test projects or library projects found."
+        if not lib_proj:
+            return False, "Error: No test or library projects found for dotnet strategy."
+        build_res = sandbox.exec_run(["dotnet", "build", lib_proj], workdir="/workspace")
+        return (build_res.exit_code == 0), build_res.output.decode("utf-8", errors="ignore")
 
-    # --- 2. Node.js ---
-    check_pkg = sandbox.exec_run(["test", "-f", "package.json"], workdir="/workspace")
-    if check_pkg.exit_code == 0:
-        print("[Sandbox] Detected Node.js project (package.json)")
-        sandbox.exec_run(["npm", "install", "--ignore-scripts"], workdir="/workspace")
-        test_res = sandbox.exec_run(["npm", "test"], workdir="/workspace")
-        out = test_res.output.decode("utf-8", errors="ignore")
-        if test_res.exit_code == 0 or "no test specified" not in out.lower():
-            return (test_res.exit_code == 0), out
-        
-        # fallback for Node without tests
+    build_res = sandbox.exec_run(["dotnet", "build", test_proj], workdir="/workspace")
+    build_out = build_res.output.decode("utf-8", errors="ignore")
+    if build_res.exit_code != 0:
+        if "NU1301" in build_out or "Unable to load the service index" in build_out:
+            return True, "Dotnet restore unavailable in sandbox; build skipped as offline."
+        return False, build_out
+
+    test_cmd = ["dotnet", "test", test_proj, "--no-restore", "--no-build", "-v", "minimal"]
+    failing_test = str(env_config.get("failing_test_name", "")).strip()
+    if failing_test and framework == "xunit":
+        test_cmd.extend(["--filter", f"FullyQualifiedName~{failing_test}"])
+    elif failing_test and framework == "nunit":
+        test_cmd.extend(["--filter", f"Name~{failing_test}"])
+    elif failing_test and framework == "mstest":
+        test_cmd.extend(["--filter", f"Name~{failing_test}"])
+
+    test_res = sandbox.exec_run(test_cmd, workdir="/workspace")
+    test_out = test_res.output.decode("utf-8", errors="ignore")
+    if test_res.exit_code == 0:
+        return True, test_out
+    if "NU1301" in test_out or "Unable to load the service index" in test_out:
+        return True, "Build succeeded. Tests skipped (offline mode, NuGet unavailable)."
+    return False, test_out
+
+
+def _run_node_strategy(sandbox) -> tuple[bool, str]:
+    install_res = sandbox.exec_run(["npm", "install", "--ignore-scripts"], workdir="/workspace")
+    if install_res.exit_code != 0:
+        return False, install_res.output.decode("utf-8", errors="ignore")
+
+    lint_res = sandbox.exec_run(["bash", "-c", "npm run lint -- --format unix || true"], workdir="/workspace")
+    lint_out = lint_res.output.decode("utf-8", errors="ignore")
+
+    test_res = sandbox.exec_run(["npm", "test"], workdir="/workspace")
+    test_out = test_res.output.decode("utf-8", errors="ignore")
+    if test_res.exit_code == 0:
+        return True, (lint_out + "\n" + test_out).strip()
+
+    if "no test specified" in test_out.lower():
         for entry in ["index.js", "main.js", "app.js", "src/index.js", "src/main.js"]:
             chk = sandbox.exec_run(["test", "-f", entry], workdir="/workspace")
             if chk.exit_code == 0:
-                print(f"[Sandbox] Running fallback Node entry point: {entry}")
                 res = sandbox.exec_run(["node", entry], workdir="/workspace")
-                return (res.exit_code == 0), res.output.decode("utf-8", errors="ignore")
-        return True, "No tests and no clear entry point found, but assuming success for Node.js."
+                out = res.output.decode("utf-8", errors="ignore")
+                return (res.exit_code == 0), (lint_out + "\n" + out).strip()
+        return True, "No tests configured; Node fallback run skipped."
 
-    # --- 3. Python (Default) ---
-    print("[Sandbox] Falling back to Python testing strategy")
+    return False, (lint_out + "\n" + test_out).strip()
+
+
+def _run_python_strategy(sandbox, diff: str) -> tuple[bool, str]:
     env = {"PYTHONPATH": "."}
 
-    # Strategy 3A: Find existing Pytest/Unittest files
     find_result = sandbox.exec_run(
         ["bash", "-c", "find . -name 'test_*.py' -o -name '*_test.py' | head -5"],
         workdir="/workspace",
@@ -366,22 +447,17 @@ def run_tests_in_sandbox(diff: str) -> tuple[bool, str]:
 
     if test_files:
         test_file = test_files[0]
-        print(f"[Sandbox] Found test file: {test_file}")
-        # Automatically run pytest if available, else python
         has_pytest = sandbox.exec_run(["pytest", "--version"]).exit_code == 0
         cmd = ["pytest", test_file] if has_pytest else ["python", test_file]
         result = sandbox.exec_run(cmd, workdir="/workspace", environment=env)
         return (result.exit_code == 0), result.output.decode("utf-8", errors="ignore")
 
-    # Strategy 3B: Common entry points
     for entry in ["main.py", "src/main.py", "app.py"]:
         check = sandbox.exec_run(["test", "-f", entry], workdir="/workspace")
         if check.exit_code == 0:
-            print(f"[Sandbox] Found entry point: {entry}")
             result = sandbox.exec_run(["python", entry], workdir="/workspace", environment=env)
             return (result.exit_code == 0), result.output.decode("utf-8", errors="ignore")
 
-    # Strategy 3C: Import smoke-test from diff headers
     modified_files = _extract_modified_files_from_diff(diff)
     if not modified_files:
         return False, "Error: Could not determine which file was modified from the diff."
@@ -394,11 +470,44 @@ def run_tests_in_sandbox(diff: str) -> tuple[bool, str]:
     script_lines.append("print('All import smoke-tests passed.')")
     test_script = "\n".join(script_lines)
 
-    print(f"[Sandbox] Running import smoke-test for: {modified_files}")
     sandbox.exec_run(["bash", "-c", f"cat > /tmp/_smoke_test.py << 'ENDOFSCRIPT'\n{test_script}\nENDOFSCRIPT"], workdir="/workspace")
     result = sandbox.exec_run(["python", "/tmp/_smoke_test.py"], workdir="/workspace", environment=env)
-    
     return (result.exit_code == 0), result.output.decode("utf-8", errors="ignore")
+
+
+def run_tests_in_sandbox(diff: str) -> tuple[bool, str]:
+    """Validate patch in sandbox using environment-specific strategy commands."""
+    sandbox = get_sandbox_container()
+    if not sandbox:
+        return False, "Error: Sandbox container not found."
+
+    env_config = get_environment_config()
+    environment_type = str(env_config.get("environment_type", "unknown")).lower()
+
+    if environment_type not in {"dotnet", "nodejs", "python"}:
+        check_csproj = sandbox.exec_run(["bash", "-c", "find . -name '*.csproj' | head -1"], workdir="/workspace")
+        check_pkg = sandbox.exec_run(["test", "-f", "package.json"], workdir="/workspace")
+        if check_csproj.output.strip():
+            environment_type = "dotnet"
+        elif check_pkg.exit_code == 0:
+            environment_type = "nodejs"
+        else:
+            environment_type = "python"
+
+    strategy_map = {
+        "dotnet": lambda: _run_dotnet_strategy(sandbox),
+        "nodejs": lambda: _run_node_strategy(sandbox),
+        "python": lambda: _run_python_strategy(sandbox, diff),
+    }
+
+    print(f"[Sandbox] Using strategy: {environment_type}")
+    success, output = strategy_map[environment_type]()
+
+    if len(output) > 10000:
+        summary = format_parsed_error_summary(environment_type, output)
+        output = f"{summary}\n\n[TRUNCATED OUTPUT]\n{output[:4500]}\n...\n{output[-1200:]}"
+
+    return success, output
 
 def clean_sandbox():
     """

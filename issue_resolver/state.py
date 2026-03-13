@@ -29,5 +29,6 @@ class AgentState(TypedDict):
     next_step: str
     iterations: int
     is_resolved: bool
+    environment_config: dict
     contribution_guidelines: str
     history: Annotated[list[dict], operator.add]

@@ -249,48 +249,44 @@ class TestAttemptFixRelevance:
         assert "+  'uz-UZ': /^(\\+?998)?(33|55|6[125-79]|7[1-69]|88|9\\d)\\d{7}$/," in diff
 
 
-    class TestCoderNodeRetry:
-      def test_retries_after_unrelated_candidate(self, monkeypatch):
+class TestCoderNodeRetry:
+    def test_retries_after_unrelated_candidate(self, monkeypatch):
         """coder_node should retry when first candidate is irrelevant, then recover."""
 
         class _Resp:
-          def __init__(self, content):
-            self.content = content
+            def __init__(self, content):
+                self.content = content
 
-        class FakeChatOllama:
-          calls = 0
+        call_counter = {"count": 0}
 
-          def __init__(self, **kwargs):
-            self.kwargs = kwargs
+        def fake_invoke_with_role_fallback(**_kwargs):
+            call_counter["count"] += 1
+            if call_counter["count"] == 1:
+                return _Resp(MARKDOWN_LARGE_REFACTOR), "qwen-2.5-coder-32b"
+            return _Resp(MARKDOWN_SIMPLE), "qwen-2.5-coder-32b"
 
-          def invoke(self, _messages):
-            FakeChatOllama.calls += 1
-            # First response is the bad refactor block; second is the relevant regex fix.
-            if FakeChatOllama.calls == 1:
-              return _Resp(MARKDOWN_LARGE_REFACTOR)
-            return _Resp(MARKDOWN_SIMPLE)
-
-        monkeypatch.setattr("issue_resolver.nodes.coder.ChatOllama", FakeChatOllama)
+        monkeypatch.setattr("issue_resolver.nodes.coder.invoke_with_role_fallback", fake_invoke_with_role_fallback)
 
         file_context = [
-          "# --- file: src/lib/isMobilePhone.js ---\n" + SOURCE_FILE
+            "# --- file: src/lib/isMobilePhone.js ---\n" + SOURCE_FILE
         ]
         state = cast(AgentState, {
-          "issue": "isMobilePhone('uz-UZ') fails for +99877 numbers",
-          "repo_path": "./sandbox_workspace",
-          "file_context": file_context,
-          "plan": "",
-          "proposed_fix": "",
-          "errors": "",
-          "validation_status": "",
-          "next_step": "",
-          "iterations": 0,
-          "is_resolved": False,
-          "contribution_guidelines": "",
-          "history": [],
+            "issue": "isMobilePhone('uz-UZ') fails for +99877 numbers",
+            "repo_path": "./sandbox_workspace",
+            "file_context": file_context,
+            "plan": "",
+            "proposed_fix": "",
+            "errors": "",
+            "validation_status": "",
+            "next_step": "",
+            "iterations": 0,
+            "is_resolved": False,
+            "environment_config": {},
+            "contribution_guidelines": "",
+            "history": [],
         })
 
         out = coder_node(state)
         assert "proposed_fix" in out
         assert out["proposed_fix"].startswith("--- a/src/lib/isMobilePhone.js")
-        assert FakeChatOllama.calls >= 2
+        assert call_counter["count"] >= 2

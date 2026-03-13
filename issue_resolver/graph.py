@@ -26,6 +26,7 @@ from langgraph.graph import StateGraph, END
 
 from issue_resolver.state import AgentState
 from issue_resolver.nodes import (
+    setup_node,
     supervisor_node,
     researcher_node,
     coder_node,
@@ -49,13 +50,15 @@ def build_graph() -> StateGraph:
     graph = StateGraph(AgentState)
 
     # ── Register nodes ──────────────────────────────────────────────
+    graph.add_node("setup", setup_node)
     graph.add_node("supervisor", supervisor_node)
     graph.add_node("researcher", researcher_node)
     graph.add_node("coder", coder_node)
     graph.add_node("reviewer", reviewer_node)
 
     # ── Entry point ─────────────────────────────────────────────────
-    graph.set_entry_point("supervisor")
+    graph.set_entry_point("setup")
+    graph.add_edge("setup", "supervisor")
 
     # ── Conditional edges from Supervisor ───────────────────────────
     graph.add_conditional_edges(

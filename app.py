@@ -69,7 +69,9 @@ if st.button("🚀 Start Resolution Process"):
             try:
                 title, body = fetch_issue_details(repo_url, int(issue_number), github_token)
                 st.success(f"Fetched Issue: {title}")
-                issue_content = f"Title: {title}\n\nBody: {body}"
+                # Use empty string when body is None to avoid the literal text "None" reaching the LLM
+                body_text = body if body else ""
+                issue_content = f"Title: {title}\n\nBody: {body_text}"
                 issue_content += "\n\nCRITICAL INSTRUCTION: The repository code is located strictly inside the './sandbox_workspace' directory. Do not search the root directory '.'"
             except Exception as e:
                 st.error(f"Error fetching issue: {e}")
@@ -107,8 +109,9 @@ if st.button("🚀 Start Resolution Process"):
             "next_step": "",
             "iterations": 0,
             "is_resolved": False,
+            "environment_config": {},
             "contribution_guidelines": "",
-            "history": []
+            "history": [],
         }
 
         # 4. Stream Execution with Stop Support

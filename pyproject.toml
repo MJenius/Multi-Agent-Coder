@@ -5,7 +5,7 @@ description = "Multi-Agent GitHub Issue Resolution System using LangGraph and Ol
 requires-python = ">=3.12"
 dependencies = [
     "langgraph",
-    "langchain-ollama",
+    "langchain-groq",
     "psycopg[binary]",
     "fastapi",
     "uvicorn",
@@ -14,6 +14,7 @@ dependencies = [
     "GitPython",
     "python-dotenv",
     "docker",
+    "pathspec",
 ]
 
 [project.optional-dependencies]

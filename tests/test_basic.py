@@ -19,13 +19,17 @@ def test_config_values():
     """Test that configuration values are set."""
     from issue_resolver.config import (
         SANDBOX_WORKSPACE_DIR,
-        OLLAMA_BASE_URL,
+        SUPERVISOR_MODEL,
         RESEARCHER_MODEL,
+        CODER_MODEL,
+        REVIEWER_MODEL,
     )
-    
+
     assert SANDBOX_WORKSPACE_DIR is not None
-    assert OLLAMA_BASE_URL is not None
-    assert RESEARCHER_MODEL is not None
+    assert SUPERVISOR_MODEL
+    assert RESEARCHER_MODEL
+    assert CODER_MODEL
+    assert REVIEWER_MODEL
 
 
 if __name__ == "__main__":

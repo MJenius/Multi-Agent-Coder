@@ -7,8 +7,16 @@ inside the Docker container and returns any test errors.
 
 from __future__ import annotations
 
+from langchain_core.messages import HumanMessage
+
 from issue_resolver.state import AgentState
-from issue_resolver.tools.sandbox_tools import apply_diff_in_sandbox, run_tests_in_sandbox
+from issue_resolver.config import REVIEWER_MODEL_CANDIDATES
+from issue_resolver.llm_utils import invoke_with_role_fallback
+from issue_resolver.tools.sandbox_tools import (
+    apply_diff_in_sandbox,
+    run_tests_in_sandbox,
+    format_parsed_error_summary,
+)
 from issue_resolver.utils.logger import append_to_history
 
 
@@ -54,19 +62,46 @@ def reviewer_node(state: AgentState) -> dict:
                 "history": append_to_history("Reviewer", "Apply Patch Failed", patch_output),
             }
 
-        # 2. Run the main application or auto-generated tests
+        # 2. Run build/test strategy in sandbox
         print("[Reviewer] Running validation in sandbox...")
         success, output = run_tests_in_sandbox(proposed_fix)
 
-        # 3. Handle the result
-        history_additions = append_to_history("Reviewer", "Test Execution", output)
+        environment_type = str(state.get("environment_config", {}).get("environment_type", "python")).lower()
+        parsed_summary = format_parsed_error_summary(environment_type, output)
+
+        # Optional fast summarizer model. If unavailable, keep parser-only summary.
+        condensed = parsed_summary
+        if not success:
+            prompt = (
+                "Summarize this build/test failure for a coding agent in one line. "
+                "Include the most actionable file/line/error token.\n\n"
+                f"Environment: {environment_type}\n"
+                f"Parsed: {parsed_summary}\n"
+                f"Raw:\n{output[:3000]}"
+            )
+            try:
+                resp, _ = invoke_with_role_fallback(
+                    role="Reviewer",
+                    candidates=REVIEWER_MODEL_CANDIDATES,
+                    messages=[HumanMessage(content=prompt)],
+                    temperature=0,
+                    max_tokens=180,
+                )
+                llm_summary = (getattr(resp, "content", "") or "").strip()
+                if llm_summary:
+                    condensed = llm_summary
+            except Exception as exc:
+                print(f"[Reviewer] [WARN] Reviewer summarizer unavailable: {exc}")
+
+        history_payload = f"{condensed}\n\n[RAW]\n{output[:5000]}"
+        history_additions = append_to_history("Reviewer", "Test Execution", history_payload)
 
         if success:
             print("[Reviewer] [OK] Code ran successfully.")
             return {"errors": "", "validation_status": "passed", "history": history_additions}
-        else:
-            print("[Reviewer] [FAIL] Code execution failed.")
-            return {"errors": output, "validation_status": "failed", "history": history_additions}
+
+        print("[Reviewer] [FAIL] Code execution failed.")
+        return {"errors": condensed, "validation_status": "failed", "history": history_additions}
 
     except Exception as exc:
         error_msg = str(exc)

@@ -1,7 +1,7 @@
 """
 Coder Node -- Generates code fixes using search-and-replace.
 
-Uses qwen2.5-coder:7b via ChatOllama.  The LLM identifies buggy lines and provides
+Uses Groq-hosted coding models. The LLM identifies buggy lines and provides
 a corrected version.  A unified diff is then generated programmatically
 using Python's difflib -- far more reliable than asking small LLMs to
 produce raw unified diffs directly.
@@ -12,12 +12,12 @@ from __future__ import annotations
 import difflib
 import re
 
-from langchain_ollama import ChatOllama
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from issue_resolver.state import AgentState
 from issue_resolver.utils.logger import append_to_history
-from issue_resolver.config import OLLAMA_BASE_URL, CODER_MODEL, CODER_NUM_PREDICT, CODER_MAX_RETRIES
+from issue_resolver.config import CODER_MODEL_CANDIDATES, CODER_NUM_PREDICT, CODER_MAX_RETRIES
+from issue_resolver.llm_utils import invoke_with_role_fallback
 
 _SYSTEM_PROMPT = r"""\
 You are a code fixing assistant. Output a minimal, surgical fix.
@@ -33,22 +33,26 @@ REPLACE:
 </fix>
 
 CRITICAL RULES:
-1. READ the issue carefully and identify the SPECIFIC identifier/element that needs fixing
-2. SEARCH must contain EXACT lines from source - NO line numbers, NO markdown fences
-3. Copy the EXACT text with EXACT indentation - spaces matter!
-4. REPLACE must be the corrected version of those SAME lines with SAME indentation
-5. Keep changes MINIMAL (1-5 lines only) - do NOT refactor or restructure
-6. Your fix MUST target the identifier mentioned in the issue
-7. Output ONLY <plan> and <fix> tags - nothing else
+1. READ the issue carefully and identify what needs fixing
+2. SEARCH must be EXACT lines from the provided source code (copy-paste exactly)
+3. Keep indentation and spacing EXACTLY as shown in source
+4. REPLACE must be the corrected version with SAME indentation
+5. Keep changes MINIMAL (1-5 lines only) - no refactoring
+6. Work with what you have: even partial file context is enough to infer the fix
+7. If issue title is clear (e.g., "Always use UTF-8 ECI"), find where encoding is set and fix it
+8. Output ONLY <plan> and <fix> tags - no extra commentary
 
-DO NOT include in SEARCH/REPLACE:
-❌ Line numbers (157:, 158:, etc.)
-❌ Markdown fences (```javascript, ```, etc.)
-❌ Comments describing the code
+DO NOT include:
+❌ Line numbers: "157: ", "158: "
+❌ Markdown fences: "```", "```javascript"
+❌ "..." indicating omission
 
-BAD vs GOOD examples:
-❌ SEARCH: ```\n157:   'uz-UZ': /regex/\n```  (has line numbers and fences!)
-✅ SEARCH:   'uz-UZ': /regex/,  (exact text only)
+EXAMPLES OF ISSUES YOU CAN FIX WITH PARTIAL CODE:
+✅ "Always use UTF-8 ECI mode" + partial file → find encoder config, add ECI flag
+✅ "Fix null pointer in handler" + class file → find null check, add safety check
+✅ "Missing return value" + method stub → infer return statement from issue context
+
+BE BOLD: Use the issue title + context to make the surgical fix.
 """
 
 
@@ -535,6 +539,7 @@ def coder_node(state: AgentState) -> dict:
         print(f"[Coder] [ABORT] Max iterations ({MAX_ITERATIONS}) reached")
         return {
             "errors": f"Max iterations ({MAX_ITERATIONS}) reached without successful fix",
+            "iterations": iterations + 1,
             "history": append_to_history("Coder", "Aborted", "Max iterations reached")
         }
 
@@ -620,13 +625,6 @@ def coder_node(state: AgentState) -> dict:
         parts.insert(1, f"## Source Code\n{context_to_use}")
         user_content = "\n\n".join(parts)
 
-        llm = ChatOllama(
-            model=CODER_MODEL,
-            temperature=temp,
-            base_url=OLLAMA_BASE_URL,
-            num_predict=CODER_NUM_PREDICT,
-        )
-
         # Build messages — on retry, append specific failure feedback
         msgs: list = [
             SystemMessage(content=_SYSTEM_PROMPT),
@@ -643,7 +641,15 @@ def coder_node(state: AgentState) -> dict:
             ))
 
         try:
-            resp = llm.invoke(msgs)
+            resp, chosen_model = invoke_with_role_fallback(
+                role="Coder",
+                candidates=CODER_MODEL_CANDIDATES,
+                messages=msgs,
+                temperature=temp,
+                max_tokens=CODER_NUM_PREDICT,
+            )
+            if attempt == 0:
+                print(f"[Coder] Using model: {chosen_model}")
         except Exception as exc:
             print(f"[Coder] [ERROR] LLM failed: {exc}")
             history.extend(append_to_history("Coder", "Error", str(exc)))

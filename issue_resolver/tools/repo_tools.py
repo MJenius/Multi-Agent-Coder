@@ -1,8 +1,8 @@
 """
 Repository Tools -- Local codebase search utilities for the Researcher agent.
 
-Each function is decorated with @tool so it can be bound to ChatOllama
-via .bind_tools().  All tools include RAM-safety guards:
+Each function is decorated with @tool so it can be bound to a tool-capable chat model
+via .bind_tools(). All tools include RAM-safety guards:
   - list_files:   caps output at 200 files
   - search_code:  caps output at 30 matches
   - read_file:    truncates at 500 lines
@@ -12,12 +12,19 @@ via .bind_tools().  All tools include RAM-safety guards:
 from __future__ import annotations
 
 import os
+import re
 import threading
 from functools import wraps
 from pathlib import Path
 
 from langchain_core.tools import tool
 from issue_resolver.config import SANDBOX_WORKSPACE_DIR
+from issue_resolver.runtime_context import get_environment_config
+
+try:
+    import pathspec
+except ImportError:  # pragma: no cover - optional at import time, required in runtime env
+    pathspec = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -136,6 +143,74 @@ IGNORE_DIRS = {
     ".idea", ".vscode",
 }
 
+
+def _load_root_gitignore_patterns(root: Path) -> list[str]:
+    gitignore = root / ".gitignore"
+    if not gitignore.is_file():
+        return []
+    try:
+        lines = gitignore.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    return [line.strip() for line in lines if line.strip() and not line.strip().startswith("#")]
+
+
+def _get_effective_ignore_parts(root: Path) -> tuple[set[str], object | None]:
+    env = get_environment_config()
+    root_gitignore = _load_root_gitignore_patterns(root)
+    configured_gitignore = env.get("gitignore_patterns", []) if isinstance(env, dict) else []
+    merged_patterns = list(dict.fromkeys(list(configured_gitignore) + root_gitignore))
+    ignore_dirs = set(env.get("ignore_dirs", IGNORE_DIRS)) if isinstance(env, dict) else set(IGNORE_DIRS)
+
+    if pathspec is None or not merged_patterns:
+        return ignore_dirs, None
+    try:
+        matcher = pathspec.PathSpec.from_lines("gitwildmatch", merged_patterns)
+    except Exception:
+        matcher = None
+    return ignore_dirs, matcher
+
+
+def _is_ignored(rel_path: Path, ignore_dirs: set[str], matcher: object | None) -> bool:
+    parts = rel_path.parts
+    if any(part in ignore_dirs or part.startswith(".") for part in parts if part):
+        return True
+    if matcher is None:
+        return False
+    rel_posix = rel_path.as_posix()
+    try:
+        return bool(matcher.match_file(rel_posix))
+    except Exception:
+        return False
+
+
+def _extract_keywords(text: str) -> list[str]:
+    tokens = re.findall(r"[a-zA-Z][a-zA-Z0-9_-]{2,}", text.lower())
+    stop_words = {
+        "the", "and", "for", "with", "that", "this", "from", "into", "when", "where", "have", "has", "was", "are",
+        "issue", "error", "fails", "failure", "fix", "bug", "test", "build",
+    }
+    ordered: list[str] = []
+    for token in tokens:
+        if token in stop_words:
+            continue
+        if token not in ordered:
+            ordered.append(token)
+    return ordered[:12]
+
+
+def _score_path(path_text: str, keywords: list[str]) -> int:
+    lowered = path_text.lower()
+    score = 0
+    for kw in keywords:
+        if kw in lowered:
+            score += 3
+        else:
+            parts = lowered.replace("-", "/").replace("_", "/").split("/")
+            if kw in parts:
+                score += 2
+    return score
+
 # ---------------------------------------------------------------------------
 # Tool 1 -- list_files
 # ---------------------------------------------------------------------------
@@ -168,18 +243,21 @@ def list_files(directory: str) -> str:
     if not root.is_dir():
         return f"Error: '{directory}' is not a valid directory."
 
+    ignore_dirs, matcher = _get_effective_ignore_parts(root)
     supported_exts = {".py", ".cs", ".xaml", ".cpp", ".h", ".js", ".ts", ".jsx", ".tsx", ".go", ".java"}
     code_files: list[str] = []
     
     for dirpath, _dirnames, filenames in os.walk(root):
         # ✅ UNIFIED FILTERING: All tools use the same IGNORE_DIRS constant
-        parts = Path(dirpath).relative_to(root).parts
-        if any(p in IGNORE_DIRS or p.startswith(".") for p in parts):
+        rel_dir = Path(dirpath).relative_to(root)
+        if _is_ignored(rel_dir, ignore_dirs, matcher):
             continue
             
         for fname in sorted(filenames):
             if any(fname.endswith(ext) for ext in supported_exts):
                 rel = Path(dirpath, fname).relative_to(root)
+                if _is_ignored(rel, ignore_dirs, matcher):
+                    continue
                 code_files.append(str(rel))
                 if len(code_files) >= 200:
                     code_files.append("[TRUNCATED -- 200 file limit reached]")
@@ -215,13 +293,14 @@ def search_code(query: str, directory: str) -> str:
     if err:
         return err
 
+    ignore_dirs, matcher = _get_effective_ignore_parts(root)
     supported_exts = {".py", ".cs", ".xaml", ".cpp", ".h", ".js", ".ts", ".jsx", ".tsx", ".go", ".java"}
     matches: list[str] = []
     
     for dirpath, _dirnames, filenames in os.walk(root):
         # ✅ UNIFIED FILTERING: Uses IGNORE_DIRS to prevent grep drowning
-        parts = Path(dirpath).relative_to(root).parts
-        if any(p in IGNORE_DIRS or p.startswith(".") for p in parts):
+        rel_dir = Path(dirpath).relative_to(root)
+        if _is_ignored(rel_dir, ignore_dirs, matcher):
             continue
             
         for fname in sorted(filenames):
@@ -229,6 +308,9 @@ def search_code(query: str, directory: str) -> str:
                 continue
                 
             fpath = Path(dirpath, fname)
+            rel = fpath.relative_to(root)
+            if _is_ignored(rel, ignore_dirs, matcher):
+                continue
             try:
                 lines = fpath.read_text(encoding="utf-8", errors="replace").splitlines()
             except OSError:
@@ -236,7 +318,6 @@ def search_code(query: str, directory: str) -> str:
                 
             for idx, line in enumerate(lines, start=1):
                 if query.lower() in line.lower():
-                    rel = fpath.relative_to(root)
                     matches.append(f"{rel}:{idx}: {line.rstrip()}")
                     if len(matches) >= 30:
                         matches.append("[TRUNCATED -- 30 match limit reached]")
@@ -322,11 +403,15 @@ def generate_repo_map(directory: str, max_depth: int = 2) -> str:
     # ✅ SAFETY: Convert max_depth to int if LLM passes it as string
     max_depth = int(max_depth) if isinstance(max_depth, str) else max_depth
 
-    # ✅ UNIFIED FILTERING: Uses the module-level IGNORE_DIRS constant
-    # This ensures consistent behavior across ALL repo tools (list_files, search_code, etc.)
+    ignore_dirs, matcher = _get_effective_ignore_parts(root)
+    env = get_environment_config()
+    issue_hint = env.get("issue_title", "") if isinstance(env, dict) else ""
+    keywords = _extract_keywords(issue_hint)
     
     tree_lines = []
     
+    top_ranked: list[str] = []
+
     def walk_tree(dir_path: Path, prefix: str = "", current_depth: int = 0):
         # Stop if we exceed max_depth
         if current_depth > max_depth:
@@ -340,27 +425,43 @@ def generate_repo_map(directory: str, max_depth: int = 2) -> str:
         except OSError:
             return
             
-        # Filter items: SKIP ignored directories and hidden folders
+        # Weighted mapping expands high-signal directories first.
         dirs = []
         files = []
         for item in items:
-            # ✅ UNIFIED FILTER: Prevents recursing into bin/, obj/, .vs, packages, etc.
-            if item in IGNORE_DIRS or item.startswith("."):
-                continue
             p = dir_path / item
+            rel = p.relative_to(root)
+            if _is_ignored(rel, ignore_dirs, matcher):
+                continue
             if p.is_dir():
                 dirs.append(item)
             else:
                 files.append(item)
+
+        dirs = sorted(
+            dirs,
+            key=lambda d: (_score_path(str((dir_path / d).relative_to(root)), keywords), d.lower()),
+            reverse=True,
+        )
+
+        if current_depth == 0 and dirs:
+            top_ranked.extend(dirs[: min(5, len(dirs))])
+
+        expanded_budget = 4 if current_depth == 0 else len(dirs)
                 
         for i, d in enumerate(dirs):
             is_last = (i == len(dirs) - 1) and (len(files) == 0)
             connector = "└── " if is_last else "├── "
-            tree_lines.append(f"{prefix}{connector}{d}/")
+            rel_dir = (dir_path / d).relative_to(root).as_posix()
+            score = _score_path(rel_dir, keywords)
+            tree_lines.append(f"{prefix}{connector}{d}/ [score={score}]")
             if len(tree_lines) >= 200:
                 return
-            extension = "    " if is_last else "│   "
-            walk_tree(dir_path / d, prefix + extension, current_depth + 1)
+            if i < expanded_budget:
+                extension = "    " if is_last else "│   "
+                walk_tree(dir_path / d, prefix + extension, current_depth + 1)
+            else:
+                tree_lines.append(f"{prefix}    ... collapsed; drill down if needed")
             
         # Only show files at max_depth level, not deeper
         if current_depth < max_depth:
@@ -393,6 +494,15 @@ def generate_repo_map(directory: str, max_depth: int = 2) -> str:
                 continue
 
     result = f"Repository Map:\n{map_str}{readme_content}"
+
+    # Token guard: keep outputs bounded and preserve high-signal guidance.
+    if len(result) > 10000:
+        priority = ", ".join(top_ranked[:3]) if top_ranked else "src, tests, and feature folders"
+        result = (
+            result[:9800]
+            + "\n\n[TRUNCATED at 10,000 characters]\n"
+            + f"Drill down into subdirectories with highest relevance first: {priority}."
+        )
     
     # ⚠️ OUTPUT VALIDATION: Warn if map is suspiciously large (possible filter bypass)
     if len(tree_lines) >= 200:
@@ -426,6 +536,8 @@ def get_symbol_definition(symbol: str, directory: str) -> str:
     if err:
         return err
 
+    ignore_dirs, matcher = _get_effective_ignore_parts(root)
+
     # Generic patterns to find definitions for various languages
     pattern1 = re.compile(r'\b(?:class|def|function|interface|struct|enum)\s+' + re.escape(symbol) + r'\b')
     pattern2 = re.compile(r'\b(?:const|let|var)\s+' + re.escape(symbol) + r'\s*=\s*(?:function|\()')
@@ -436,8 +548,8 @@ def get_symbol_definition(symbol: str, directory: str) -> str:
     
     for dirpath, _dirnames, filenames in os.walk(root):
         # ✅ UNIFIED FILTERING: Uses IGNORE_DIRS constant like all other tools
-        parts = Path(dirpath).relative_to(root).parts
-        if any(p in IGNORE_DIRS or p.startswith(".") for p in parts):
+        rel_dir = Path(dirpath).relative_to(root)
+        if _is_ignored(rel_dir, ignore_dirs, matcher):
             continue
             
         for fname in sorted(filenames):
@@ -445,6 +557,9 @@ def get_symbol_definition(symbol: str, directory: str) -> str:
                 continue
                 
             fpath = Path(dirpath, fname)
+            rel = fpath.relative_to(root)
+            if _is_ignored(rel, ignore_dirs, matcher):
+                continue
             try:
                 lines = fpath.read_text(encoding="utf-8", errors="replace").splitlines()
             except OSError:
@@ -452,7 +567,6 @@ def get_symbol_definition(symbol: str, directory: str) -> str:
             
             for idx, line in enumerate(lines, start=1):
                 if pattern1.search(line) or pattern2.search(line) or pattern3.search(line):
-                    rel = fpath.relative_to(root)
                     matches.append(f"{rel}:{idx}: {line.strip()}")
                     if len(matches) >= 30:
                         matches.append("[TRUNCATED -- 30 limit reached]")

@@ -1,14 +1,17 @@
-"""
-Centralized configuration -- all tunables in one place.
-
-Values are read from environment variables with sensible defaults
-(matching the original hardcoded values). Create a `.env` file in
-the project root to override any setting.
-"""
+"""Centralized configuration for model, graph, and sandbox settings."""
 
 from __future__ import annotations
 
 import os
+
+
+def _parse_model_list(env_key: str, fallback: list[str]) -> list[str]:
+    """Parse comma-separated model names from environment with stable fallback order."""
+    raw = os.environ.get(env_key, "")
+    if not raw.strip():
+        return fallback
+    parsed = [part.strip() for part in raw.split(",") if part.strip()]
+    return parsed or fallback
 
 # Load .env file if python-dotenv is installed (optional dependency)
 try:
@@ -18,19 +21,54 @@ except ImportError:
     pass
 
 # ---------------------------------------------------------------------------
-# Ollama / LLM
+# Groq / LLM
 # ---------------------------------------------------------------------------
-OLLAMA_BASE_URL: str = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+GROQ_API_KEY: str = os.environ.get("GROQ_API_KEY", "")
 
-SUPERVISOR_MODEL: str = os.environ.get("OLLAMA_SUPERVISOR_MODEL", "llama3.2:latest")
-CODER_MODEL: str = os.environ.get("OLLAMA_CODER_MODEL", "qwen2.5-coder:7b")
-RESEARCHER_MODEL: str = os.environ.get("OLLAMA_RESEARCHER_MODEL", "llama3.2:latest")
+SUPERVISOR_MODEL_CANDIDATES: list[str] = _parse_model_list(
+    "GROQ_SUPERVISOR_MODELS",
+    [
+        "llama-3.3-70b-versatile",
+        "mixtral-8x7b-32768",
+    ],
+)
+RESEARCHER_MODEL_CANDIDATES: list[str] = _parse_model_list(
+    "GROQ_RESEARCHER_MODELS",
+    [
+        "llama-3.3-70b-versatile",
+        "mixtral-8x7b-32768",
+    ],
+)
+CODER_MODEL_CANDIDATES: list[str] = _parse_model_list(
+    "GROQ_CODER_MODELS",
+    [
+        "qwen-2.5-coder-32b",
+        "llama-3.3-70b-versatile",
+        "mixtral-8x7b-32768",
+    ],
+)
+REVIEWER_MODEL_CANDIDATES: list[str] = _parse_model_list(
+    "GROQ_REVIEWER_MODELS",
+    [
+        "llama-3.1-8b-instant",
+        "llama-3.3-70b-versatile",
+    ],
+)
 
-# Performance-optimized defaults (reduce for faster operation, increase for complex fixes)
-# Reduced from 1024 to 400 for faster generation (most fixes are ~100-200 tokens)
-CODER_NUM_PREDICT: int = int(os.environ.get("OLLAMA_CODER_NUM_PREDICT", "400"))
-# Reduced from 2 to 1 retry (2 total attempts) - smarter targeting makes retries less needed  
+SUPERVISOR_MODEL: str = SUPERVISOR_MODEL_CANDIDATES[0]
+RESEARCHER_MODEL: str = RESEARCHER_MODEL_CANDIDATES[0]
+CODER_MODEL: str = CODER_MODEL_CANDIDATES[0]
+REVIEWER_MODEL: str = REVIEWER_MODEL_CANDIDATES[0]
+
+# Performance-optimized defaults
+CODER_NUM_PREDICT: int = int(os.environ.get("GROQ_CODER_MAX_TOKENS", "400"))
 CODER_MAX_RETRIES: int = int(os.environ.get("CODER_MAX_RETRIES", "1"))
+
+# Retry controls for transient API failures and rate limits.
+LLM_MAX_ATTEMPTS: int = int(os.environ.get("LLM_MAX_ATTEMPTS", "4"))
+LLM_BACKOFF_INITIAL_SECONDS: float = float(os.environ.get("LLM_BACKOFF_INITIAL_SECONDS", "1.0"))
+LLM_BACKOFF_MULTIPLIER: float = float(os.environ.get("LLM_BACKOFF_MULTIPLIER", "2.0"))
+LLM_BACKOFF_MAX_SECONDS: float = float(os.environ.get("LLM_BACKOFF_MAX_SECONDS", "12.0"))
 
 # ---------------------------------------------------------------------------
 # Graph

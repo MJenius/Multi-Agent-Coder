@@ -1,7 +1,7 @@
 """
 Researcher Node -- Phase 2: LLM-driven codebase exploration.
 
-Uses llama3.2 via ChatOllama with tool-binding to:
+Uses Groq-hosted models with tool-binding to:
   1. List .py files in the target repository.
   2. Search for relevant function / class names mentioned in the issue.
   3. Read the most relevant files (max 3 files, <=500 lines each).
@@ -20,12 +20,12 @@ import json
 import re
 from pathlib import Path
 
-from langchain_ollama import ChatOllama
 from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
 
 from issue_resolver.state import AgentState
 from issue_resolver.utils.logger import append_to_history
-from issue_resolver.config import OLLAMA_BASE_URL, RESEARCHER_MODEL
+from issue_resolver.config import RESEARCHER_MODEL_CANDIDATES
+from issue_resolver.llm_utils import invoke_with_role_fallback
 from issue_resolver.tools import (
     REPO_TOOLS, 
     list_files, 
@@ -35,17 +35,6 @@ from issue_resolver.tools import (
     get_symbol_definition
 )
 
-
-# ---------------------------------------------------------------------------
-# LLM setup -- tool-augmented model
-# ---------------------------------------------------------------------------
-_base_llm = ChatOllama(
-    model=RESEARCHER_MODEL,
-    temperature=0,
-    base_url=OLLAMA_BASE_URL,
-)
-
-_llm = _base_llm.bind_tools(REPO_TOOLS)
 
 # Map tool names --> callables for dispatching
 _TOOL_MAP = {
@@ -72,8 +61,15 @@ SPEED RULES (CRITICAL):
 2. If the issue has a HINT (🎯) → follow the hint directly with read_file().
 3. Only call generate_repo_map() if you have NO idea where the relevant code is.
 4. Target searches to SPECIFIC folders (e.g., './QRCoder', './src'), never search root '.'.
-5. Maximum 3 files read. Stop as soon as you have the relevant code.
-6. After reading the target file, STOP. Do not explore further unless the code is clearly wrong file.
+5. For encoding/mode issues: Search for related classes (Data, Generator, Encoder, Manager, etc.)
+6. Read up to 3 target files. Multi-file context is often needed for architectural issues.
+7. After reading 3 files OR hitting the line limit, STOP and summarize findings.
+
+ISSUE-SPECIFIC GUIDANCE:
+──────────────────────
+- Encoding/ECI mode issue? → Find the Data or Encoder class, look for mode/encoding enums or configs
+- Null/error handling? → Find the method + surrounding error checks
+- Performance issue? → Find the hot loop/class + its dependencies
 
 CONSTRAINTS:
 - NEVER read more than 3 files total.
@@ -86,7 +82,7 @@ CONSTRAINTS:
 # ---------------------------------------------------------------------------
 # Constants -- memory guards
 # ---------------------------------------------------------------------------
-_MAX_TOOL_ROUNDS = 5   # max LLM <-> tool iterations
+_MAX_TOOL_ROUNDS = 8   # Increased to allow more search/read cycles for complex issues
 _MAX_FILES_READ = 3    # cap on read_file calls
 _MAX_TOTAL_LINES = 500  # soft cap across all files read
 
@@ -253,30 +249,62 @@ def _try_search_variations(
 
 
 def _extract_keywords_from_issue(issue_text: str) -> list[str]:
-    """Extract searchable function/class names from issue text.
-    
-    Looks for backtick-wrapped identifiers and camelCase/PascalCase names
-    that are likely function or class names worth searching for.
+    """Extract searchable identifiers and technical terms from issue text.
+
+    Strategy (in priority order):
+      1. Backtick-wrapped identifiers: `isMobilePhone`, `calculate_total()`
+      2. camelCase/PascalCase names in prose (>=6 chars, mixed case)
+      3. All-caps abbreviations from the title: UTF, ECI, HTTP, URL
+      4. Hyphenated technical terms from the title: UTF-8, ISO-8859, Base64
+      5. Meaningful words (>=5 chars) from the title as last-resort search seeds
     """
-    keywords = []
-    
+    _STOP_WORDS = {
+        'always', 'using', 'encode', 'should', 'would', 'could', 'there',
+        'title', 'issue', 'error', 'fixed', 'fails', 'build', 'tests',
+        'false', 'true', 'null', 'none', 'undefined',
+    }
+
+    keywords: list[str] = []
+
     # 1. Backtick-wrapped identifiers: `isMobilePhone`, `calculate_total()`
     for m in re.findall(r'`([A-Za-z_][A-Za-z0-9_]*(?:\([^)]*\))?)`', issue_text):
         name = m.split('(')[0]
-        if len(name) >= 4 and name.lower() not in ('true', 'false', 'null', 'undefined', 'none'):
+        if len(name) >= 4 and name.lower() not in _STOP_WORDS:
             keywords.append(name)
-    
+
     # 2. camelCase identifiers in prose (at least 6 chars, must have mixed case)
     for m in re.findall(r'\b([a-z][a-zA-Z0-9]{5,})\b', issue_text):
         if any(c.isupper() for c in m) and m not in keywords:
             keywords.append(m)
-    
-    # Deduplicate preserving order
-    seen = set()
-    unique = []
+
+    # 3-5: Mine the issue title for technical terms when #1 and #2 yield nothing
+    # Extract title line, strip leading "Title: " prefix if present
+    title_line = issue_text.splitlines()[0].strip()
+    if title_line.lower().startswith("title:"):
+        title_line = title_line[6:].strip()
+
+    if title_line:
+        # 3. All-caps abbreviations (UTF, ECI, URL, HTTP, JSON, QR …)
+        for m in re.findall(r'\b([A-Z]{2,})\b', title_line):
+            if m.lower() not in _STOP_WORDS and m not in keywords:
+                keywords.append(m)
+
+        # 4. Hyphenated technical terms (UTF-8, ISO-8859, TLS-1.2 …)
+        for m in re.findall(r'\b([A-Za-z][A-Za-z0-9]*-[A-Za-z0-9]+)\b', title_line):
+            if m.lower() not in _STOP_WORDS and m not in keywords:
+                keywords.append(m)
+
+        # 5. Longer meaningful words >= 5 chars that aren't stop words
+        for m in re.findall(r'\b([A-Za-z]{5,})\b', title_line):
+            if m.lower() not in _STOP_WORDS and m.lower() not in {k.lower() for k in keywords}:
+                keywords.append(m)
+
+    # Deduplicate preserving order (case-insensitive)
+    seen: set[str] = set()
+    unique: list[str] = []
     for k in keywords:
-        if k not in seen:
-            seen.add(k)
+        if k.lower() not in seen:
+            seen.add(k.lower())
             unique.append(k)
     return unique
 
@@ -335,6 +363,21 @@ def researcher_node(state: AgentState) -> dict:
     human_str = f"GitHub Issue:\n{issue_text}\n\nRepository path: {repo_path}\n\n"
     if errors:
         human_str += f"Supervisor Feedback/Errors:\n{errors}\n\n"
+    
+    # Add smart hints based on issue keywords
+    issue_lower = issue_text.lower()
+    if any(kw in issue_lower for kw in ["encod", "eci", "utf-8", "utf8", "charset", "character encode"]):
+        human_str += "HINT: This is an ENCODING issue. Look for classes/enums with names like:\n"
+        human_str += "  - Data (e.g., QRCodeData), Generator, Encoder, Manager\n"
+        human_str += "  - Methods: Encode, Compress, Prepare, SetEncoding\n"
+        human_str += "  - Enums: EncodingMode, ECI, Compression, CharacterSet\n"
+        human_str += "Search for these patterns first.\n\n"
+    elif any(kw in issue_lower for kw in ["null", "npe", "exception", "error"]):
+        human_str += "HINT: This is an ERROR handling issue. Look for:\n"
+        human_str += "  - Methods that could throw exceptions\n"
+        human_str += "  - Missing null checks or validations\n"
+        human_str += "  - Error handling patterns\n\n"
+    
     human_str += "Please explore the repository and find the relevant code."
 
     # Seed the conversation with system prompt + issue
@@ -491,21 +534,10 @@ def researcher_node(state: AgentState) -> dict:
                 except Exception as e:
                     print(f"[Researcher] ⚠ Auto-search error for '{keyword}': {e}")
     
-    # Early exit if auto-search found relevant code
-    if snippets and files_read >= 1:
-        print(f"[Researcher] ✅ Auto-search provided {files_read} file(s), {total_lines} lines. Skipping LLM loop.")
-        print(f"[Researcher] Done -- collected {len(snippets)} snippet(s), "
-              f"{files_read} file(s) read, ~{total_lines} lines.")
-        history_additions.extend(
-            append_to_history("Researcher", "Targeting Complete", f"Collected {len(snippets)} snippets (auto-search). Read {files_read} files.")
-        )
-        return_dict = {
-            "file_context": snippets,
-            "history": history_additions
-        }
-        if contribution_guidelines:
-            return_dict["contribution_guidelines"] = contribution_guidelines
-        return return_dict
+    # NOTE: We do NOT early-exit after auto-search anymore.
+    # Auto-search finds quick wins (1-2 files), but for complex issues
+    # (like encoding modes), we need the LLM loop to understand relationships.
+    # If auto-search found something, the LLM can refine. If not, LLM will search.
 
     # ─────────────────────────────────────────────────────────────────────────
     # PHASE 2: LLM-DRIVEN SEARCH (Fall back to this only if hints didn't work)
@@ -529,7 +561,15 @@ def researcher_node(state: AgentState) -> dict:
 
         # ── Ask the LLM ────────────────────────────────────────────
         try:
-            response = _llm.invoke(messages)
+            response, chosen_model = invoke_with_role_fallback(
+                role="Researcher",
+                candidates=RESEARCHER_MODEL_CANDIDATES,
+                messages=messages,
+                temperature=0,
+                tools=REPO_TOOLS,
+            )
+            if round_num == 1:
+                print(f"[Researcher] Using model: {chosen_model}")
         except Exception as exc:
             print(f"[Researcher] [ERROR] LLM call failed: {exc}")
             break
@@ -610,6 +650,68 @@ def researcher_node(state: AgentState) -> dict:
                         pass
 
             messages.append(ToolMessage(content=str(result), tool_call_id=call_id))
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # PHASE 2.5: LAST-RESORT SCAN -- runs only if LLM produced zero results
+    # (covers cases where: LLM returned plain text with no tool calls, API
+    #  failed silently, or all tool calls returned empty matches)
+    # ─────────────────────────────────────────────────────────────────────────
+    if not snippets:
+        print("[Researcher] [FALLBACK] All LLM phases returned 0 snippets. Running last-resort scan.")
+        history_additions.extend(
+            append_to_history("Researcher", "Last-Resort Scan", "LLM returned no tool calls. Scanning repo directly.")
+        )
+
+        # Step 1: generate repo map to discover directory structure
+        try:
+            map_result = generate_repo_map.invoke({"directory": repo_path})
+            if map_result and not map_result.startswith(("Error", "ERROR")):
+                print(f"[Researcher] [FALLBACK] Repo map obtained ({len(map_result)} chars).")
+        except Exception as map_exc:
+            map_result = ""
+            print(f"[Researcher] [FALLBACK] Repo map failed: {map_exc}")
+
+        # Step 2: search for keywords derived from the issue title
+        fallback_keywords = _extract_keywords_from_issue(issue_text)
+        print(f"[Researcher] [FALLBACK] Searching for title terms: {fallback_keywords[:4]}")
+
+        for term in fallback_keywords[:4]:
+            if files_read >= _MAX_FILES_READ:
+                break
+            try:
+                result = search_code.invoke({"query": term, "directory": repo_path})
+                if result and not result.startswith(("No matches", "Error", "ERROR")):
+                    top_file = _get_top_file_from_search(result)
+                    if top_file and files_read < _MAX_FILES_READ:
+                        top_file_normalized = top_file.replace("\\", "/")
+                        auto_path = str((Path(repo_path) / top_file_normalized).resolve())
+                        try:
+                            file_result = read_file.invoke({"file_path": auto_path})
+                            if not file_result.startswith(("Error", "[BLOCKED")):
+                                lines_found = file_result.count("\n")
+                                print(f"[Researcher] [FALLBACK] ✅ Read '{top_file_normalized}' ({lines_found} lines)")
+                                snippets.append(f"# --- file: {top_file_normalized} ---\n{file_result}")
+                                files_read += 1
+                                total_lines += lines_found + 1
+                                history_additions.extend(
+                                    append_to_history(
+                                        "Researcher", "Last-Resort Read",
+                                        f"✅ {top_file_normalized} ({lines_found} lines) via '{term}'"
+                                    )
+                                )
+                                break  # one file is enough for the coder to orient
+                        except Exception:
+                            pass
+            except Exception as search_exc:
+                print(f"[Researcher] [FALLBACK] Search error for '{term}': {search_exc}")
+
+        if not snippets and map_result:
+            # Store the repo map itself as context if we still have nothing —
+            # better than returning empty-handed; the coder can use it to navigate.
+            snippets.append(f"# --- repo map ---\n{map_result[:3000]}")
+            history_additions.extend(
+                append_to_history("Researcher", "Last-Resort Read", "Using repo map as context (no source file found)")
+            )
 
     print(f"[Researcher] Done -- collected {len(snippets)} snippet(s), "
           f"{files_read} file(s) read, ~{total_lines} lines.")

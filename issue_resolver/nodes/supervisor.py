@@ -1,7 +1,7 @@
 """
 Supervisor Node -- The "brain" of the agent graph.
 
-Uses llama3.2:3b via ChatOllama to decide the next step:
+Uses Groq-hosted models to decide the next step:
   1. If file_context is empty        -> route to "researcher"
   2. If file_context exists but no fix -> route to "coder"
   3. If a fix exists with no errors    -> route to "end"
@@ -14,22 +14,13 @@ the rules above dominate; in later phases the LLM will handle ambiguity
 
 from __future__ import annotations
 
-from langchain_ollama import ChatOllama
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from issue_resolver.state import AgentState
 from issue_resolver.utils.logger import append_to_history
-from issue_resolver.config import OLLAMA_BASE_URL, SUPERVISOR_MODEL, MAX_ITERATIONS
+from issue_resolver.config import MAX_ITERATIONS, SUPERVISOR_MODEL_CANDIDATES
+from issue_resolver.llm_utils import invoke_with_role_fallback
 
-
-# ---------------------------------------------------------------------------
-# LLM setup
-# ---------------------------------------------------------------------------
-_llm = ChatOllama(
-    model=SUPERVISOR_MODEL,
-    temperature=0,          # deterministic routing
-    base_url=OLLAMA_BASE_URL,
-)
 
 _SYSTEM_PROMPT = """\
 You are the Supervisor of a multi-agent system that resolves GitHub issues.
@@ -54,6 +45,26 @@ def supervisor_node(state: AgentState) -> dict:
     errors = state.get("errors", "")
     validation_status = state.get("validation_status", "")
     iterations = state.get("iterations", 0)
+
+    # [HIGHEST PRIORITY] Prevent infinite loops: end if MAX_ITERATIONS reached
+    if iterations >= MAX_ITERATIONS:
+        print(f"[Supervisor] [GUARD] Max iterations ({MAX_ITERATIONS}) reached. Forcing end.")
+        summary_prompt = f"The system failed to resolve the issue after {MAX_ITERATIONS} iterations. Errors: {errors[:200]}"
+        try:
+            summary_response, _ = invoke_with_role_fallback(
+                role="Supervisor",
+                candidates=SUPERVISOR_MODEL_CANDIDATES,
+                messages=[HumanMessage(content=summary_prompt)],
+                temperature=0,
+            )
+            failure_summary = summary_response.content.strip()
+        except Exception:
+            failure_summary = f"System reached iteration limit ({MAX_ITERATIONS}). Last error: {errors[:100]}"
+        return {
+            "next_step": "end",
+            "iterations": iterations + 1,
+            "history": append_to_history("Supervisor", "Iteration Limit", failure_summary),
+        }
 
     # Terminal coder failure guard: avoid routing back to coder forever.
     if isinstance(errors, str) and errors.startswith("CODE FIX FAILED after"):
@@ -96,26 +107,6 @@ def supervisor_node(state: AgentState) -> dict:
             print("[Supervisor] [GUARD] No errors and no validation_status. Accepting fix.")
             return {"next_step": "end", "iterations": iterations + 1, "is_resolved": True}
 
-    # Safety valve: prevent infinite loops
-    if iterations >= MAX_ITERATIONS:
-        print("[Supervisor] [WARN] Max iterations reached -- triggering Graceful Exit.")
-        
-        # Ask LLM for a failure summary
-        summary_prompt = f"The system failed to resolve the issue after 5 iterations. Briefly summarize what was attempted and what went wrong based on the errors: {errors}"
-        try:
-            summary_response = _llm.invoke([HumanMessage(content=summary_prompt)])
-            failure_summary = summary_response.content.strip()
-        except Exception:
-            failure_summary = f"System failed after 5 iterations. Persistent errors: {errors}"
-            
-        history_addition = append_to_history("Supervisor", "Failure Summary", failure_summary)
-        
-        return {
-            "next_step": "end", 
-            "iterations": iterations + 1,
-            "history": history_addition
-        }
-
     # ------------------------------------------------------------------
     # LLM-assisted reasoning (adds flexibility for later phases)
     # ------------------------------------------------------------------
@@ -136,23 +127,45 @@ def supervisor_node(state: AgentState) -> dict:
     ]
 
     try:
-        response = _llm.invoke(messages)
+        response, chosen_model = invoke_with_role_fallback(
+            role="Supervisor",
+            candidates=SUPERVISOR_MODEL_CANDIDATES,
+            messages=messages,
+            temperature=0,
+        )
+        print(f"[Supervisor] Using model: {chosen_model}")
         decision = response.content.strip().lower().split()[0]
     except Exception as exc:
-        # If Ollama is unreachable, fall back to deterministic logic
+        # If LLM call fails, fall back to deterministic logic
         print(f"[Supervisor] [WARN] LLM call failed ({exc}); using rule-based fallback.")
         decision = _deterministic_decision(file_context, proposed_fix, errors, validation_status)
 
     # HARD GUARD: Override LLM if it violates basic logic
-    # This ensures Phase 2 tools ALWAYS run if context is empty
-    if not file_context and decision != "researcher":
-        print(f"[Supervisor] [GUARD] Overriding '{decision}' -> 'researcher' (no context).")
-        decision = "researcher"
-
+    # For the first 2 iterations, force researcher if no context has been gathered yet.
+    # After that, if researcher keeps returning empty-handed, force coder to try anyway —
+    # better to attempt a fix with minimal context than to loop indefinitely.
     new_errors = errors
-    if decision == "researcher" and not file_context and iterations > 0:
-        print("[Supervisor] [GUARD] Search Dead-End detected. Forcing broader search guidelines.")
-        new_errors = "Search Dead-End: Previous search found no relevant logic. You MUST broaden your search, check build files, or read documentation."
+    if not file_context:
+        if iterations < 2 and decision != "researcher":
+            print(f"[Supervisor] [GUARD] Overriding '{decision}' -> 'researcher' (no context, early stage).")
+            decision = "researcher"
+        elif iterations >= 2 and decision == "researcher":
+            # Researcher had enough chances; force coder to try with issue context alone.
+            print("[Supervisor] [GUARD] Researcher exhausted attempts with no context found. Forcing coder.")
+            decision = "coder"
+            new_errors = (
+                "Research Dead-End: Could not locate relevant source files after multiple attempts. "
+                "Use the issue title and what you know about the codebase to propose the most likely fix. "
+                "Call generate_repo_map or list_files first to orient yourself."
+            )
+        elif iterations > 0 and decision == "researcher":
+            # Still in early stage but signalling dead-end for next researcher pass
+            print("[Supervisor] [GUARD] Search Dead-End detected. Forcing broader search guidelines.")
+            new_errors = (
+                "Search Dead-End: Previous search found no relevant logic. "
+                "You MUST broaden your search: try generate_repo_map, search for keywords "
+                "from the issue title, or check build files and documentation."
+            )
 
     # Validate the decision
     if decision not in ("researcher", "coder", "end"):
