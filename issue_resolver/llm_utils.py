@@ -21,6 +21,12 @@ from issue_resolver.config import (
     LLM_BACKOFF_MULTIPLIER,
     LLM_MAX_ATTEMPTS,
 )
+from issue_resolver.utils.token_bucket import (
+    check_rate_limit_before_call,
+    record_tokens_used,
+    wait_for_capacity,
+    get_rate_limit_status,
+)
 
 _SELECTED_MODEL_BY_ROLE: dict[str, str] = {}
 _DECOMMISSIONED_MODELS: set[str] = {}  # Models removed due to 400 errors (decommissioned)
@@ -146,6 +152,7 @@ def invoke_with_role_fallback(
     - Fallback to next candidate on any error
     - Adaptive downscaling: removes permanently decommissioned models (400 errors)
     - Transient error retry with exponential backoff
+    - Rate limiting: tracks tokens used and waits before calls if approaching limits (Phase 4)
     """
     if ChatGroq is None:
         raise RuntimeError("langchain-groq is not installed")
@@ -167,6 +174,18 @@ def invoke_with_role_fallback(
     if selected and selected in ordered:
         ordered = [selected] + [m for m in ordered if m != selected]
 
+    # Pre-call rate limit check (Phase 4: TokenBucket)
+    estimated_input_tokens = sum(len(str(msg)) // 4 for msg in messages)
+    estimated_total_tokens = estimated_input_tokens + (max_tokens or 1024)
+    
+    rate_limit_status = get_rate_limit_status()
+    if rate_limit_status.get("percent_used", 0) >= 70:
+        print(f"[{role}] [RATE_LIMIT] Using {rate_limit_status.get('percent_used', 0):.1f}% of TPM limit. " 
+              f"Waiting for capacity...")
+        wait_seconds = wait_for_capacity(estimated_total_tokens)
+        if wait_seconds > 0:
+            print(f"[{role}] [RATE_LIMIT] Waited {wait_seconds:.1f}s for capacity")
+
     last_exc: Exception | None = None
     for model_name in ordered:
         try:
@@ -178,6 +197,14 @@ def invoke_with_role_fallback(
             )
             llm_to_call = llm.bind_tools(tools) if tools else llm
             response = _invoke_with_backoff(llm_to_call, messages, role)
+            
+            # Record tokens used (Phase 4: TokenBucket)
+            # Estimate output tokens from response content
+            output_text = getattr(response, "content", "")
+            estimated_output_tokens = len(str(output_text)) // 4
+            total_tokens_used = estimated_input_tokens + estimated_output_tokens
+            record_tokens_used(total_tokens_used)
+            
             _SELECTED_MODEL_BY_ROLE[role] = model_name
             return response, model_name
         except Exception as exc:  # noqa: BLE001

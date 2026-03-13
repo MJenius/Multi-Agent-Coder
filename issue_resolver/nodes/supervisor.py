@@ -111,8 +111,15 @@ def supervisor_node(state: AgentState) -> dict:
         print("[Supervisor] [GUARD] Plan found but no test. Routing to test_generator.")
         return {"next_step": "test_generator", "iterations": iterations + 1}
 
+    # NEW: Test validation guard (Phase 5 test-driven topology)
+    # After test is generated, validate it runs (to reproduce the issue)
+    if test_code and not isinstance(test_runs_initially, str):
+        # test_runs_initially is a bool, not yet validated
+        print("[Supervisor] [GUARD] Test generated but not yet validated. Routing to test_validator.")
+        return {"next_step": "test_validator", "iterations": iterations + 1}
+
     if test_code and not proposed_fix:
-        print("[Supervisor] [GUARD] Test found but no fix proposed. Routing to coder.")
+        print("[Supervisor] [GUARD] Test validated. Now routing to coder for fix.")
         return {"next_step": "coder", "iterations": iterations + 1}
 
     # HARD GUARD: Tri-state validation check

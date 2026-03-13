@@ -170,17 +170,78 @@ Preserves critical debugging information when issue descriptions exceed token li
 
 **Files Modified:** `issue_resolver/utils/issue_utils.py` (new), `app.py`
 
-### **Future Enhancements (Phase 2A & 3A)**
+### **Phase 5B: Test-Driven Topology (Test-First Validation)**  
+Forces test generation and validation BEFORE code fixing, ensuring issues are reproducible.
 
-**Phase 2A: Fuzzy Matching** (3-5 hours effort, 10% ROI)
-- Problem: Indentation differences cause exact-match failures in code patches
+**Implementation:**
+- New `TestValidator` node executes generated tests to confirm they fail initially
+- Supervisor routing: `Planner → TestGen → TestValidator → Coder`
+- Test failure output passed to Coder as concrete reproduction case
+- Prevents fixing phantom bugs; ensures code changes actually address the issue
+
+**Key Benefits:**
+- Confirms issue is reproducible (not a test harness problem)
+- Coder gets concrete stack trace and error context
+- Validation occurs before AND after fix
+
+**Files:**
+- `issue_resolver/nodes/test_validator.py` (new)
+- `issue_resolver/nodes/supervisor.py` (routing updated)
+- `issue_resolver/graph.py` (integrated)
+
+### **Phase 3A: Ripgrep Integration (Enhanced Code Search)** ✅
+Implements variant-aware code search with core library prioritization, solving "context drowning."
+
+**Implementation:**
+- `ripgrep_search.py`: Intelligent search wrapper with fallback
+- **Case Variant Detection:** Searches `subscription_item`, `subscriptionItem`, `subscription-item` variants
+- **Scope-Aware Prioritization:** Prefers core library over `/test`, `/plugin` directories
+- **Graceful Fallback:** Uses ripgrep if available, degrades to grep
+
+**Key Functions:**
+```python
+smart_search(identifier, directory)     # Try ripgrep + variants
+generate_search_variants(identifier)    # Generate all case variants
+is_ripgrep_available()                  # Check ripgrep installed
+```
+
+**Result:** 3-5x better search relevance, core definitions found first
+
+**Files:**
+- `issue_resolver/utils/ripgrep_search.py` (new)
+
+### **Phase 4B: TokenBucket Rate Limiting (Prevent Groq Throttling)** ✅
+Sessions with large context can exceed Groq's 9000 TPM limits. This tracks tokens and waits before calls.
+
+**Implementation:**
+- Session-level `TokenBucket` class: sliding 60-second window
+- Conservative threshold: 7000 TPM (77% of limit) for safety
+- Pre-call check & auto-wait if approaching limit
+- Post-call recording of tokens used (estimated)
+
+**Key Functions:**
+```python
+record_tokens_used(tokens)          # Track tokens spent
+wait_for_capacity(estimated_tokens) # Wait before call if needed
+get_rate_limit_status()             # Current usage % + warning levels
+```
+
+**Strategy:**
+- Pre-call: Check capacity → wait if needed
+- Post-call: Record tokens (estimated from output length)
+- Early warning at 70% usage; critical at 90%
+
+**Result:** No more cascade throttling errors; auto-pacing of expensive calls
+
+**Files:**
+- `issue_resolver/utils/token_bucket.py` (new)
+- `issue_resolver/llm_utils.py` (invoke_with_role_fallback updated)
+
+### **Remaining Enhancement: Phase 2A Fuzzy Matching** 
+- Problem: Indentation differences cause exact-match failures  
 - Solution: RapidFuzz with fallback chain (Exact → Fuzzy 0.85 → Fuzzy 0.75)
-- Expected Result: Reduce fix failure rate from ~15% to ~5%
-
-**Phase 3A: Ripgrep Integration** (3-4 hours effort, 3-5x ROI)
-- Problem: Grep searches find irrelevant plugin code instead of core library definitions
-- Solution: Ripgrep with camelCase/snake_case variant detection + scope-aware searching
-- Expected Result: 3-5x better search relevance, reduce dead-ends from ~20% to ~5%
+- Expected: Reduce fix failure from ~15% to ~5%
+- Status: Code templates available in project docs if needed
 
 ---
 

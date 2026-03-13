@@ -45,6 +45,7 @@ from issue_resolver.nodes import (
     researcher_node,
     planner_node,
     testgen_node,
+    test_validator_node,
     coder_node,
     reviewer_node,
 )
@@ -58,6 +59,8 @@ def _route_supervisor(state: AgentState) -> str:
         return "planner"
     elif next_step == "test_generator":
         return "test_generator"
+    elif next_step == "test_validator":
+        return "test_validator"
     elif next_step == "coder":
         return "coder"
     else:
@@ -75,6 +78,7 @@ def build_graph() -> StateGraph:
     graph.add_node("researcher", researcher_node)
     graph.add_node("planner", planner_node)
     graph.add_node("test_generator", testgen_node)
+    graph.add_node("test_validator", test_validator_node)
     graph.add_node("coder", coder_node)
     graph.add_node("reviewer", reviewer_node)
 
@@ -90,6 +94,7 @@ def build_graph() -> StateGraph:
             "researcher": "researcher",
             "planner": "planner",
             "test_generator": "test_generator",
+            "test_validator": "test_validator",
             "coder": "coder",
             "end": END,
         },
@@ -99,6 +104,7 @@ def build_graph() -> StateGraph:
     graph.add_edge("researcher", "supervisor")
     graph.add_edge("planner", "supervisor")
     graph.add_edge("test_generator", "supervisor")
+    graph.add_edge("test_validator", "supervisor")
     # Coder proposes a fix, Reviewer tests it
     graph.add_edge("coder", "reviewer")
     # Reviewer returns errors (or lack thereof), loop back to Supervisor
