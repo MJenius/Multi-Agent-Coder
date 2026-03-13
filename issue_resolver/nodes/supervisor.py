@@ -1,15 +1,16 @@
 """
 Supervisor Node -- The "brain" of the agent graph.
 
-Uses Groq-hosted models to decide the next step:
-  1. If file_context is empty        -> route to "researcher"
-  2. If file_context exists but no fix -> route to "coder"
-  3. If a fix exists with no errors    -> route to "end"
+Uses Groq-hosted models to decide the next step in the test-driven loop:
+  1. If file_context is empty          -> route to "researcher"
+  2. If file_context exists but no plan -> route to "planner"
+  3. If plan exists but no test         -> route to "test_generator"
+  4. If test exists but no fix          -> route to "coder"
+  5. If fix validated successfully      -> route to "end"
 
 The LLM acts as a reasoning layer on top of the deterministic rules,
-providing a natural-language justification for each decision.  In Phase 1
-the rules above dominate; in later phases the LLM will handle ambiguity
-(e.g., partial fixes, flaky tests).
+providing a natural-language justification for each decision. Guards
+prevent infinite loops (e.g., max 2 Planner refinements before forcing Coder).
 """
 
 from __future__ import annotations
@@ -18,19 +19,21 @@ from langchain_core.messages import SystemMessage, HumanMessage
 
 from issue_resolver.state import AgentState
 from issue_resolver.utils.logger import append_to_history
-from issue_resolver.config import MAX_ITERATIONS, SUPERVISOR_MODEL_CANDIDATES
+from issue_resolver.config import MAX_ITERATIONS, SUPERVISOR_MODEL_CANDIDATES, PLANNER_MAX_ITERATIONS
 from issue_resolver.llm_utils import invoke_with_role_fallback
 
 
 _SYSTEM_PROMPT = """\
 You are the Supervisor of a multi-agent system that resolves GitHub issues.
-You must decide the NEXT action.  Reply with EXACTLY one word -- one of:
-  researcher  |  coder  |  end
+You must decide the NEXT action. Reply with EXACTLY one word -- one of:
+  researcher  |  planner  |  test_generator  |  coder  |  end
 
 Rules:
-- If no relevant code snippets have been gathered yet -> researcher
-- If code snippets exist but no fix has been proposed  -> coder
-- If a fix exists and there are no outstanding errors   -> end
+- If no relevant code snippets have been gathered yet     -> researcher
+- If code snippets exist but no strategy is developed    -> planner
+- If a strategy exists but no test has been generated    -> test_generator
+- If a test exists but no fix has been proposed          -> coder
+- If a fix exists and validation passed without errors   -> end
 """
 
 
@@ -41,9 +44,13 @@ def supervisor_node(state: AgentState) -> dict:
     # Deterministic fast-path (cheap, no LLM call needed)
     # ------------------------------------------------------------------
     file_context = state.get("file_context", [])
+    plan = state.get("plan", "")
+    test_code = state.get("test_code", "")
     proposed_fix = state.get("proposed_fix", "")
     errors = state.get("errors", "")
     validation_status = state.get("validation_status", "")
+    error_category = state.get("error_category", "")
+    plan_iteration = state.get("plan_iteration", 0)
     iterations = state.get("iterations", 0)
 
     # [HIGHEST PRIORITY] Prevent infinite loops: end if MAX_ITERATIONS reached
@@ -66,6 +73,16 @@ def supervisor_node(state: AgentState) -> dict:
             "history": append_to_history("Supervisor", "Iteration Limit", failure_summary),
         }
 
+    # GUARD: Prevent infinite Planner loops (max 2 refinements)
+    # After 2 Planner iterations, force progression to TestGen or Coder
+    if plan and plan_iteration >= (PLANNER_MAX_ITERATIONS or 2):
+        print(f"[Supervisor] [GUARD] Planner iteration limit ({PLANNER_MAX_ITERATIONS}) reached. Forcing test_generator.")
+        return {
+            "next_step": "test_generator",
+            "iterations": iterations + 1,
+            "history": append_to_history("Supervisor", "Planner Limit", "Planner refinements exhausted. Proceeding to test generation."),
+        }
+
     # Terminal coder failure guard: avoid routing back to coder forever.
     if isinstance(errors, str) and errors.startswith("CODE FIX FAILED after"):
         print("[Supervisor] [GUARD] Terminal coder failure detected. Ending run.")
@@ -80,9 +97,22 @@ def supervisor_node(state: AgentState) -> dict:
             ),
         }
 
-    # HARD GUARD: If we have code but no fix, route to coder (MUST happen before any LLM call)
-    if file_context and not proposed_fix:
-        print("[Supervisor] [GUARD] Code found but no fix proposed. Routing to coder.")
+    # HARD GUARD: Tier-1 routing (deterministic; no LLM needed)
+    # Priority order: Researcher → Planner → TestGen → Coder → Validate
+    if not file_context:
+        print("[Supervisor] [GUARD] No code context found. Routing to researcher.")
+        return {"next_step": "researcher", "iterations": iterations + 1}
+
+    if file_context and not plan:
+        print("[Supervisor] [GUARD] Code found but no plan. Routing to planner.")
+        return {"next_step": "planner", "iterations": iterations + 1}
+
+    if plan and not test_code:
+        print("[Supervisor] [GUARD] Plan found but no test. Routing to test_generator.")
+        return {"next_step": "test_generator", "iterations": iterations + 1}
+
+    if test_code and not proposed_fix:
+        print("[Supervisor] [GUARD] Test found but no fix proposed. Routing to coder.")
         return {"next_step": "coder", "iterations": iterations + 1}
 
     # HARD GUARD: Tri-state validation check
@@ -107,11 +137,28 @@ def supervisor_node(state: AgentState) -> dict:
             print("[Supervisor] [GUARD] No errors and no validation_status. Accepting fix.")
             return {"next_step": "end", "iterations": iterations + 1, "is_resolved": True}
 
+    # SMART GUARD: On test failure with LogicFailure, consider Planner refinement
+    # if we're still within iteration budget (plan_iteration < PLANNER_MAX_ITERATIONS - 1)
+    if (proposed_fix and errors and error_category == "LogicFailure" and 
+        plan and plan_iteration < (PLANNER_MAX_ITERATIONS - 1 or 1)):
+        print("[Supervisor] [GUARD] LogicFailure detected and Planner refinement budget available. Routing to planner.")
+        return {
+            "next_step": "planner",
+            "iterations": iterations + 1,
+            "errors": f"Previous fix caused logic failure. Refine strategy. Error: {errors[:300]}",
+            "history": append_to_history("Supervisor", "Planner Refinement", "Test failure detected. Requesting strategy refinement."),
+        }
+
+    # ------------------------------------------------------------------
+    # LLM-assisted reasoning (adds flexibility for later phases)
+    # ------------------------------------------------------------------
     # ------------------------------------------------------------------
     # LLM-assisted reasoning (adds flexibility for later phases)
     # ------------------------------------------------------------------
     context_summary = (
         f"File context items: {len(file_context)}\n"
+        f"Plan status: {'yes' if plan else 'no'}\n"
+        f"Test code present: {'yes' if test_code else 'no'}\n"
         f"Proposed fix present: {'yes' if proposed_fix else 'no'}\n"
         f"Errors: {errors if errors else 'none'}\n"
         f"Iterations so far: {iterations}"
@@ -138,39 +185,27 @@ def supervisor_node(state: AgentState) -> dict:
     except Exception as exc:
         # If LLM call fails, fall back to deterministic logic
         print(f"[Supervisor] [WARN] LLM call failed ({exc}); using rule-based fallback.")
-        decision = _deterministic_decision(file_context, proposed_fix, errors, validation_status)
+        decision = _deterministic_decision(file_context, plan, test_code, proposed_fix, errors, validation_status)
 
     # HARD GUARD: Override LLM if it violates basic logic
-    # For the first 2 iterations, force researcher if no context has been gathered yet.
-    # After that, if researcher keeps returning empty-handed, force coder to try anyway —
-    # better to attempt a fix with minimal context than to loop indefinitely.
+    # Validate that decision aligns with state progression
     new_errors = errors
-    if not file_context:
-        if iterations < 2 and decision != "researcher":
+    if not file_context and decision != "researcher":
+        if iterations < 2:
             print(f"[Supervisor] [GUARD] Overriding '{decision}' -> 'researcher' (no context, early stage).")
             decision = "researcher"
-        elif iterations >= 2 and decision == "researcher":
-            # Researcher had enough chances; force coder to try with issue context alone.
-            print("[Supervisor] [GUARD] Researcher exhausted attempts with no context found. Forcing coder.")
-            decision = "coder"
+        else:
+            print("[Supervisor] [GUARD] Researcher exhausted. Forcing planner with minimal context.")
+            decision = "planner"
             new_errors = (
-                "Research Dead-End: Could not locate relevant source files after multiple attempts. "
-                "Use the issue title and what you know about the codebase to propose the most likely fix. "
-                "Call generate_repo_map or list_files first to orient yourself."
+                "Research Dead-End: Could not locate relevant source files. "
+                "Generate a strategy based on the issue description and general knowledge of the codebase."
             )
-        elif iterations > 0 and decision == "researcher":
-            # Still in early stage but signalling dead-end for next researcher pass
-            print("[Supervisor] [GUARD] Search Dead-End detected. Forcing broader search guidelines.")
-            new_errors = (
-                "Search Dead-End: Previous search found no relevant logic. "
-                "You MUST broaden your search: try generate_repo_map, search for keywords "
-                "from the issue title, or check build files and documentation."
-            )
-
+    
     # Validate the decision
-    if decision not in ("researcher", "coder", "end"):
+    if decision not in ("researcher", "planner", "test_generator", "coder", "end"):
         print(f"[Supervisor] [WARN] Unexpected LLM output '{decision}'; using fallback.")
-        decision = _deterministic_decision(file_context, proposed_fix, errors, validation_status)
+        decision = _deterministic_decision(file_context, plan, test_code, proposed_fix, errors, validation_status)
         
     history_addition = append_to_history("Supervisor", "Routing Decision", decision)
 
@@ -192,12 +227,19 @@ def supervisor_node(state: AgentState) -> dict:
 # ---------------------------------------------------------------------------
 def _deterministic_decision(
     file_context: list[str],
+    plan: str,
+    test_code: str,
     proposed_fix: str,
     errors: str,
     validation_status: str = "",
 ) -> str:
+    """Pure rule-based routing without LLM call."""
     if not file_context:
         return "researcher"
+    if not plan:
+        return "planner"
+    if not test_code:
+        return "test_generator"
     if not proposed_fix:
         return "coder"
     if not errors and validation_status in ("passed", "inconclusive", ""):

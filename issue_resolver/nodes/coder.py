@@ -17,7 +17,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from issue_resolver.state import AgentState
 from issue_resolver.utils.logger import append_to_history
 from issue_resolver.config import CODER_MODEL_CANDIDATES, CODER_NUM_PREDICT, CODER_MAX_RETRIES
-from issue_resolver.llm_utils import invoke_with_role_fallback
+from issue_resolver.llm_utils import invoke_with_role_fallback, calculate_max_tokens
 
 _SYSTEM_PROMPT = r"""\
 You are a code fixing assistant. Output a minimal, surgical fix.
@@ -53,6 +53,25 @@ EXAMPLES OF ISSUES YOU CAN FIX WITH PARTIAL CODE:
 ✅ "Missing return value" + method stub → infer return statement from issue context
 
 BE BOLD: Use the issue title + context to make the surgical fix.
+"""
+
+_DEBUGGING_MODE_PROMPT = r"""\
+
+DEBUGGING MODE ACTIVATED
+════════════════════════════════════════
+Your previous fix attempt had the following error(s):
+
+ERROR CONTEXT: {error_context}
+
+STRATEGY FOR THIS RETRY:
+1. The test error indicates the failure is at specific line(s): {error_lines}
+2. Re-examine the SEARCH block - it must match the EXACT source code at those line numbers
+3. Do NOT change your SEARCH block randomly; align it precisely to the error location
+4. If you used fuzzy matching before and it failed, make the SEARCH more specific
+5. Check if your REPLACE introduces a syntax error or type mismatch
+6. Verify your fix addresses the root cause, not just suppressing the symptom
+
+Remember: The test MUST pass after your fix is applied.
 """
 
 
@@ -594,6 +613,16 @@ def coder_node(state: AgentState) -> dict:
 
     history: list[dict] = []
 
+    # --- Dynamic token allocation ---
+    # Estimate input tokens from base prompt (rough: 1 token per 4 characters)
+    estimated_prompt = "\n\n".join(base_parts) + "\n\n## Source Code\n" + (focus_context or full_context)
+    estimated_input_tokens = len(estimated_prompt) // 4
+    
+    # Calculate dynamic max_tokens using the first model in candidates
+    first_model = CODER_MODEL_CANDIDATES[0] if CODER_MODEL_CANDIDATES else "qwen-2.5-coder-32b"
+    dynamic_max_tokens = calculate_max_tokens(first_model, estimated_input_tokens)
+    print(f"[Coder] Dynamic token calc: input≈{estimated_input_tokens}, max_out={dynamic_max_tokens}")
+
     # --- Retry loop with smart context strategy ---
     # Attempt 1: Use focused context (fast, targeted)
     # Retries: Use full context (slower, comprehensive)
@@ -601,8 +630,21 @@ def coder_node(state: AgentState) -> dict:
     for i in range(CODER_MAX_RETRIES):
         temperatures.append(round(min(0.15, 0.1 * (i + 1)), 2))  # Max temp reduced to 0.15
     diff = ""
-    plan = ""
+    plan = state.get("plan", "")  # Retrieve plan from state if available
     last_failure = ""
+    
+    # Build system prompt with debugging mode if we're retrying
+    system_prompt = _SYSTEM_PROMPT
+    if iterations > 0:
+        error_category = state.get("error_category", "Unknown")
+        error_context = state.get("test_error_context", "")[:200]  # Limit to 200 chars
+        error_lines = state.get("error_line_numbers", "")
+        
+        system_prompt += _DEBUGGING_MODE_PROMPT.format(
+            error_context=error_context or "Test failed",
+            error_lines=error_lines or "(not specified)"
+        )
+        print(f"[Coder] [DEBUGGING MODE ACTIVATED] Category: {error_category}")
 
     for attempt, temp in enumerate(temperatures):
         is_first_attempt = (attempt == 0)
@@ -622,12 +664,19 @@ def coder_node(state: AgentState) -> dict:
 
         # Build prompt with selected context
         parts = base_parts.copy()
-        parts.insert(1, f"## Source Code\n{context_to_use}")
+        
+        # Add plan context if available
+        if plan:
+            parts.insert(1, f"## Fix Strategy (from Planner)\n{plan}")
+            parts.insert(2, f"## Source Code\n{context_to_use}")
+        else:
+            parts.insert(1, f"## Source Code\n{context_to_use}")
+        
         user_content = "\n\n".join(parts)
 
         # Build messages — on retry, append specific failure feedback
         msgs: list = [
-            SystemMessage(content=_SYSTEM_PROMPT),
+            SystemMessage(content=system_prompt),
             HumanMessage(content=user_content),
         ]
         if last_failure and not is_first_attempt:
@@ -646,7 +695,7 @@ def coder_node(state: AgentState) -> dict:
                 candidates=CODER_MODEL_CANDIDATES,
                 messages=msgs,
                 temperature=temp,
-                max_tokens=CODER_NUM_PREDICT,
+                max_tokens=dynamic_max_tokens,
             )
             if attempt == 0:
                 print(f"[Coder] Using model: {chosen_model}")

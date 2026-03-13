@@ -12,11 +12,46 @@ except ImportError:  # pragma: no cover - allows offline/unit testing without Gr
 
 from issue_resolver.config import (
     GROQ_API_KEY,
+    GROQ_CONTEXT_WINDOWS,
+    CODER_MAX_OUTPUT_RATIO,
+    CODER_MIN_OUTPUT_TOKENS,
+    CODER_TARGET_OUTPUT_TOKENS,
     LLM_BACKOFF_INITIAL_SECONDS,
     LLM_BACKOFF_MAX_SECONDS,
     LLM_BACKOFF_MULTIPLIER,
     LLM_MAX_ATTEMPTS,
 )
+
+_SELECTED_MODEL_BY_ROLE: dict[str, str] = {}
+
+
+def calculate_max_tokens(
+    model_name: str,
+    input_tokens: int,
+    ratio: float | None = None,
+) -> int:
+    """Calculate dynamic max_tokens based on model context window and input size.
+    
+    Args:
+        model_name: Name of the Groq model (e.g., "qwen-2.5-coder-32b")
+        input_tokens: Estimated number of input tokens (rough: 1 token per 4 characters)
+        ratio: Output allocation ratio (default from config CODER_MAX_OUTPUT_RATIO)
+    
+    Returns:
+        Recommended max_tokens for generation (between CODER_MIN_OUTPUT_TOKENS and CODER_TARGET_OUTPUT_TOKENS)
+    """
+    if ratio is None:
+        ratio = CODER_MAX_OUTPUT_RATIO
+    
+    context_window = GROQ_CONTEXT_WINDOWS.get(model_name, 8192)  # Default to 8K if unknown
+    available_tokens = context_window - input_tokens
+    
+    # Calculate allocation: ratio of available tokens
+    allocated = int(available_tokens * ratio)
+    
+    # Clamp between min and target
+    return max(CODER_MIN_OUTPUT_TOKENS, min(CODER_TARGET_OUTPUT_TOKENS, allocated))
+
 
 _SELECTED_MODEL_BY_ROLE: dict[str, str] = {}
 

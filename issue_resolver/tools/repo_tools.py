@@ -576,7 +576,101 @@ def get_symbol_definition(symbol: str, directory: str) -> str:
         return f"No definition found for symbol '{symbol}'."
     return "\n".join(matches)
 
+
+# ---------------------------------------------------------------------------
+# Tool 6 -- generate_symbol_map
+# ---------------------------------------------------------------------------
+@tool
+@with_timeout(20)
+def generate_symbol_map(directory: str) -> str:
+    """Generate a symbol-level map (classes, functions, methods) with line numbers.
+    
+    Uses regex to extract function/class definitions from all code files.
+    Returns tab-separated entries: symbol_name | line_number | type | file
+    
+    Useful for Planner to understand repo structure without reading full files.
+    Capped at 100 symbols to avoid overwhelming context.
+    
+    Args:
+        directory: Root directory to scan.
+    
+    Returns:
+        Tab-separated symbol list, or error message if generation fails.
+    """
+    root = Path(directory).resolve()
+    if not root.is_dir():
+        return f"Error: '{directory}' is not a valid directory."
+    
+    # PATH CONFINEMENT
+    err = _check_confinement(root, "directory")
+    if err:
+        return err
+    
+    ignore_dirs, matcher = _get_effective_ignore_parts(root)
+    supported_exts = {".py", ".cs", ".xaml", ".cpp", ".h", ".js", ".ts", ".jsx", ".tsx", ".go", ".java"}
+    
+    symbols: list[tuple[str, int, str, str]] = []  # (name, line, type, file)
+    
+    # Regex patterns for different languages
+    class_pattern = re.compile(r'^\s*(?:class|interface|struct)\s+(\w+)')
+    def_pattern = re.compile(r'^\s*(?:def|function|func|private|public)*\s*(?:\w+\s+)*(\w+)\s*\(')
+    
+    for dirpath, _dirnames, filenames in os.walk(root):
+        rel_dir = Path(dirpath).relative_to(root)
+        if _is_ignored(rel_dir, ignore_dirs, matcher):
+            continue
+        
+        for fname in sorted(filenames):
+            if not any(fname.endswith(ext) for ext in supported_exts):
+                continue
+            
+            fpath = Path(dirpath, fname)
+            rel = fpath.relative_to(root)
+            if _is_ignored(rel, ignore_dirs, matcher):
+                continue
+            
+            try:
+                lines = fpath.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
+                continue
+            
+            for idx, line in enumerate(lines, start=1):
+                # Detect class/interface/struct
+                class_match = class_pattern.search(line)
+                if class_match:
+                    symbols.append((class_match.group(1), idx, "class", str(rel).replace("\\", "/")))
+                    if len(symbols) >= 100:
+                        break
+                
+                # Detect function/method definitions (exclude class definitions already caught)
+                if not class_match:
+                    def_match = def_pattern.search(line)
+                    if def_match:
+                        func_name = def_match.group(1)
+                        # Skip if it's obviously not a function  (e.g., 'if', 'for', 'while')
+                        if func_name not in ('if', 'for', 'while', 'switch', 'catch', 'elif', 'else', 'elif'):
+                            symbols.append((func_name, idx, "function", str(rel).replace("\\", "/")))
+                            if len(symbols) >= 100:
+                                break
+                
+                if len(symbols) >= 100:
+                    break
+            
+            if len(symbols) >= 100:
+                break
+    
+    if not symbols:
+        return "(No symbols found in codebase)"
+    
+    # Format output: symbol_name | line_number | type | file
+    formatted = []
+    for name, line, sym_type, file in sorted(symbols, key=lambda x: x[3] + ":" + str(x[1]))[:100]:
+        formatted.append(f"{name:40} | {line:5} | {sym_type:10} | {file}")
+    
+    return "\n".join(formatted)
+
+
 # ---------------------------------------------------------------------------
 # Convenience list for .bind_tools()
 # ---------------------------------------------------------------------------
-REPO_TOOLS = [list_files, search_code, read_file, generate_repo_map, get_symbol_definition]
+REPO_TOOLS = [list_files, search_code, read_file, generate_repo_map, get_symbol_definition, generate_symbol_map]

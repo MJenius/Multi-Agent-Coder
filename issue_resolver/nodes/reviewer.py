@@ -2,11 +2,12 @@
 Reviewer Node -- Applies the Coder's proposed fix and runs it in the sandbox.
 
 This is a deterministic node (no LLM). It validates the code safely
-inside the Docker container and returns any test errors.
+inside the Docker container and returns any test errors with categorization.
 """
 
 from __future__ import annotations
 
+import re
 from langchain_core.messages import HumanMessage
 
 from issue_resolver.state import AgentState
@@ -18,6 +19,46 @@ from issue_resolver.tools.sandbox_tools import (
     format_parsed_error_summary,
 )
 from issue_resolver.utils.logger import append_to_history
+
+
+def _categorize_error(error_text: str) -> str:
+    """Classify error into: SyntaxError | EnvironmentError | LogicFailure | FrameworkError."""
+    lower = error_text.lower()
+    
+    patterns = {
+        "SyntaxError": (r"syntaxerror|unexpected token|invalid syntax|parse error", 2.0),
+        "EnvironmentError": (r"modulenotfound|importerror|no such file|not found error|cannot find", 2.0),
+        "LogicFailure": (r"assertion|expected.*got|test failed|failure", 1.5),
+        "FrameworkError": (r"cannot find|not a function|undefined|typeerror", 1.0),
+    }
+    
+    scores = {}
+    for category, (pattern, weight) in patterns.items():
+        if re.search(pattern, lower):
+            scores[category] = weight
+    
+    return max(scores, key=scores.get) if scores else "UnknownError"
+
+
+def _extract_line_numbers(error_text: str) -> str:
+    """Extract line numbers from error traceback."""
+    lines = []
+    
+    # Python: "line XX" or "File ..., line XX"
+    python_pattern = r'line\s+(\d+)'
+    # C#: "CS XXXX (XX,YY)"
+    csharp_pattern = r'\((\d+),\d+\)'
+    # JavaScript: "at ... (X:Y)"
+    js_pattern = r':\s*(\d+):\d+'
+    
+    for pattern in [python_pattern, csharp_pattern, js_pattern]:
+        matches = re.findall(pattern, error_text)
+        if matches:
+            lines.extend(matches[:5])  # Limit to first 5 line numbers
+    
+    if lines:
+        return "lines " + ", ".join(sorted(set(lines)))
+    return ""
 
 
 def reviewer_node(state: AgentState) -> dict:
@@ -98,10 +139,28 @@ def reviewer_node(state: AgentState) -> dict:
 
         if success:
             print("[Reviewer] [OK] Code ran successfully.")
-            return {"errors": "", "validation_status": "passed", "history": history_additions}
+            return {
+                "errors": "",
+                "validation_status": "passed",
+                "history": history_additions
+            }
 
         print("[Reviewer] [FAIL] Code execution failed.")
-        return {"errors": condensed, "validation_status": "failed", "history": history_additions}
+        
+        # Categorize error for Coder's debugging mode
+        error_category = _categorize_error(output)
+        error_line_numbers = _extract_line_numbers(output)
+        
+        print(f"[Reviewer] Error category: {error_category}, Lines: {error_line_numbers}")
+        
+        return {
+            "errors": condensed,
+            "validation_status": "failed",
+            "error_category": error_category,
+            "test_error_context": output[:500],  # First 500 chars of error
+            "error_line_numbers": error_line_numbers,
+            "history": history_additions,
+        }
 
     except Exception as exc:
         error_msg = str(exc)

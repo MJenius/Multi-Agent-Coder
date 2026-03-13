@@ -64,11 +64,50 @@ REVIEWER_MODEL: str = REVIEWER_MODEL_CANDIDATES[0]
 CODER_NUM_PREDICT: int = int(os.environ.get("GROQ_CODER_MAX_TOKENS", "400"))
 CODER_MAX_RETRIES: int = int(os.environ.get("CODER_MAX_RETRIES", "1"))
 
+# Dynamic token allocation for Coder
+# Maps model name to context window size (in tokens)
+GROQ_CONTEXT_WINDOWS: dict[str, int] = {
+    "qwen-2.5-coder-32b": 32768,
+    "llama-3.3-70b-versatile": 8192,
+    "mixtral-8x7b-32768": 32768,
+    "llama-3.1-8b-instant": 8192,
+}
+
+CODER_MAX_OUTPUT_RATIO: float = float(os.environ.get("CODER_MAX_OUTPUT_RATIO", "0.3"))
+CODER_MIN_OUTPUT_TOKENS: int = int(os.environ.get("CODER_MIN_OUTPUT_TOKENS", "500"))
+CODER_TARGET_OUTPUT_TOKENS: int = int(os.environ.get("CODER_TARGET_OUTPUT_TOKENS", "3000"))
+
 # Retry controls for transient API failures and rate limits.
 LLM_MAX_ATTEMPTS: int = int(os.environ.get("LLM_MAX_ATTEMPTS", "4"))
 LLM_BACKOFF_INITIAL_SECONDS: float = float(os.environ.get("LLM_BACKOFF_INITIAL_SECONDS", "1.0"))
 LLM_BACKOFF_MULTIPLIER: float = float(os.environ.get("LLM_BACKOFF_MULTIPLIER", "2.0"))
 LLM_BACKOFF_MAX_SECONDS: float = float(os.environ.get("LLM_BACKOFF_MAX_SECONDS", "12.0"))
+
+# Rate limiting configuration (Groq API)
+GROQ_RPM_LIMIT: int = int(os.environ.get("GROQ_RPM_LIMIT", "30"))
+GROQ_TPM_LIMIT: int = int(os.environ.get("GROQ_TPM_LIMIT", "6000"))
+
+# Planner and TestGen model candidates
+PLANNER_MODEL_CANDIDATES: list[str] = _parse_model_list(
+    "GROQ_PLANNER_MODELS",
+    [
+        "llama-3.3-70b-versatile",
+        "mixtral-8x7b-32768",
+    ],
+)
+TESTGEN_MODEL_CANDIDATES: list[str] = _parse_model_list(
+    "GROQ_TESTGEN_MODELS",
+    [
+        "qwen-2.5-coder-32b",
+        "llama-3.3-70b-versatile",
+    ],
+)
+
+PLANNER_MODEL: str = PLANNER_MODEL_CANDIDATES[0]
+TESTGEN_MODEL: str = TESTGEN_MODEL_CANDIDATES[0]
+
+# Planner refinement limits
+PLANNER_MAX_ITERATIONS: int = int(os.environ.get("PLANNER_MAX_ITERATIONS", "2"))
 
 # ---------------------------------------------------------------------------
 # Graph
