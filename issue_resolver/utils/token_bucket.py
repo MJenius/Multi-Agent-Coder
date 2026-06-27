@@ -22,8 +22,7 @@ from typing import Optional
 class TokenBucket:
     """Track token usage and enforce rate limits."""
     
-    # Conservative threshold: 77% of 9000 TPM
-    DEFAULT_TPM_LIMIT = 7000
+    DEFAULT_TPM_LIMIT = 80000
     MINUTE_WINDOW = 60.0
     
     def __init__(self, tpm_limit: int = DEFAULT_TPM_LIMIT, window_seconds: float = MINUTE_WINDOW):

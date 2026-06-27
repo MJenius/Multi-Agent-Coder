@@ -21,7 +21,7 @@ def test_terminal_coder_failure_ends_run():
 
 
 def test_researcher_loop_breaks_after_two_iterations():
-    """After iterations >= 2 with empty file_context, supervisor must force coder."""
+    """After iterations >= 2 with empty file_context, supervisor must force planner."""
     state = {
         "issue": "Always use UTF-8 ECI mode when encoding in UTF-8",
         "file_context": [],
@@ -35,7 +35,7 @@ def test_researcher_loop_breaks_after_two_iterations():
         return_value=(AIMessage(content="researcher"), "fake-model"),
     ):
         out = supervisor_node(state)
-    assert out["next_step"] == "coder", (
+    assert out["next_step"] == "planner", (
         "Supervisor must escape researcher loop after 2 iterations with no context"
     )
 

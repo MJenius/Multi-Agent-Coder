@@ -22,10 +22,12 @@ sys_logger = logging.getLogger("issue_resolver")
 # Secret redaction — prevents PATs from leaking into logs / state history
 # ---------------------------------------------------------------------------
 _SECRET_PATTERNS = [
-    re.compile(r'ghp_[A-Za-z0-9]{36,}'),           # GitHub PAT (classic)
-    re.compile(r'github_pat_[A-Za-z0-9_]{22,}'),    # GitHub PAT (fine-grained)
-    re.compile(r'gho_[A-Za-z0-9]{36,}'),             # GitHub OAuth token
-    re.compile(r'ghs_[A-Za-z0-9]{36,}'),             # GitHub App token
+    re.compile(r'ghp_[A-Za-z0-9]{36,}'),
+    re.compile(r'github_pat_[A-Za-z0-9_]{22,}'),
+    re.compile(r'gho_[A-Za-z0-9]{36,}'),
+    re.compile(r'ghs_[A-Za-z0-9]{36,}'),
+    re.compile(r'nvapi-[A-Za-z0-9_\-]{20,}'),
+    re.compile(r'gsk_[A-Za-z0-9]{20,}'),
 ]
 
 

@@ -1,18 +1,17 @@
-"""Groq helpers for role-based model selection and resilient invocation."""
-
 from __future__ import annotations
 
 import time
 from typing import Any
 
 try:
-    from langchain_groq import ChatGroq  # type: ignore[import-not-found]
-except ImportError:  # pragma: no cover - allows offline/unit testing without Groq package
-    ChatGroq = None
+    from langchain_openai import ChatOpenAI
+except ImportError:
+    ChatOpenAI = None
 
 from issue_resolver.config import (
-    GROQ_API_KEY,
-    GROQ_CONTEXT_WINDOWS,
+    NVIDIA_BASE_URL,
+    NVIDIA_CONTEXT_WINDOWS,
+    MODEL_API_KEY_MAP,
     CODER_MAX_OUTPUT_RATIO,
     CODER_MIN_OUTPUT_TOKENS,
     CODER_TARGET_OUTPUT_TOKENS,
@@ -29,19 +28,17 @@ from issue_resolver.utils.token_bucket import (
 )
 
 _SELECTED_MODEL_BY_ROLE: dict[str, str] = {}
-_DECOMMISSIONED_MODELS: set[str] = set()  # Models removed due to 400 errors (decommissioned)
-_QUOTA_EXCEEDED_MODELS: set[str] = set()  # Models that hit daily TPD limits this session (temporary)
+_DECOMMISSIONED_MODELS: set[str] = set()
+_QUOTA_EXCEEDED_MODELS: set[str] = set()
 
-# Gold Standard: Explicit model alias mapping for decommissioned → fallback
-# Implements dynamic resilience to prevent "Model Drift" (using retired endpoint IDs)
-# If a model is confirmed dead by Groq API, automatically redirect to alternative
-_MODEL_ALIASES: dict[str, str] = {
-    "mixtral-8x7b-32768": "llama-3.3-70b-versatile",
-    "mixtral-8x7b": "llama-3.3-70b-versatile",
-    "qwen-2.5-coder-32b": "llama-3.3-70b-versatile",
-    "qwen-2.5": "llama-3.3-70b-versatile",
-    "llama-3.1-70b-versatile": "llama-3.3-70b-versatile",  # Also auto-upgrade to latest stable
-}
+
+def _resolve_api_key(model_name: str) -> str:
+    key = MODEL_API_KEY_MAP.get(model_name, "")
+    if not key:
+        for prefix, mapped_key in MODEL_API_KEY_MAP.items():
+            if model_name.startswith(prefix.split("/")[0]):
+                return mapped_key
+    return key
 
 
 def calculate_max_tokens(
@@ -49,30 +46,15 @@ def calculate_max_tokens(
     input_tokens: int,
     ratio: float | None = None,
 ) -> int:
-    """Calculate dynamic max_tokens based on model context window and input size.
-    
-    Args:
-        model_name: Name of the Groq model (e.g., "qwen-2.5-coder-32b")
-        input_tokens: Estimated number of input tokens (rough: 1 token per 4 characters)
-        ratio: Output allocation ratio (default from config CODER_MAX_OUTPUT_RATIO)
-    
-    Returns:
-        Recommended max_tokens for generation (between CODER_MIN_OUTPUT_TOKENS and CODER_TARGET_OUTPUT_TOKENS)
-    """
     if ratio is None:
         ratio = CODER_MAX_OUTPUT_RATIO
-    
-    context_window = GROQ_CONTEXT_WINDOWS.get(model_name, 8192)  # Default to 8K if unknown
+
+    context_window = NVIDIA_CONTEXT_WINDOWS.get(model_name, 131_072)
     available_tokens = context_window - input_tokens
-    
-    # Calculate allocation: ratio of available tokens
+
     allocated = int(available_tokens * ratio)
-    
-    # Clamp between min and target
+
     return max(CODER_MIN_OUTPUT_TOKENS, min(CODER_TARGET_OUTPUT_TOKENS, allocated))
-
-
-_SELECTED_MODEL_BY_ROLE: dict[str, str] = {}
 
 
 def _is_transient_error(exc: Exception) -> bool:
@@ -87,6 +69,10 @@ def _is_transient_error(exc: Exception) -> bool:
         "unavailable",
         "service unavailable",
         "too many requests",
+        "503",
+        "502",
+        "internal server error",
+        "overloaded",
     )
     return any(marker in text for marker in transient_markers)
 
@@ -105,24 +91,7 @@ def _is_model_unavailable(exc: Exception) -> bool:
 
 
 def _is_model_decommissioned(exc: Exception) -> bool:
-    """Detect permanent model decommissioning (specific API errors only).
-    
-    CRITICAL: Distinguish between:
-    - Permanent decommissioning (model retired/removed) → return True
-    - Transient 400 errors (context window, token limit, rate limit) → return False
-    
-    A 400 Bad Request can occur for many reasons (token overflow, tier limits, etc.).
-    Only treat as decommissioning if the error explicitly mentions:
-    - Model not found / does not exist
-    - Model deprecated / retired / discontinued
-    - Permission denied for this model (API key limitations)
-    
-    Token/context window overflows are NOT decommissioning - they're transient.
-    """
     text = str(exc).lower()
-    
-    # ONLY these specific markers indicate permanent decommissioning
-    # NOT just any "400" error, as those can be transient (token overflow, tier limits)
     permanent_markers = (
         "model not found",
         "model_not_found",
@@ -134,27 +103,11 @@ def _is_model_decommissioned(exc: Exception) -> bool:
         "not authorized",
         "invalid model",
     )
-    
-    # Check for actual model decommissioning, not generic 400 errors
-    is_permanently_unavailable = any(marker in text for marker in permanent_markers)
-    return is_permanently_unavailable
+    return any(marker in text for marker in permanent_markers)
 
 
 def _is_quota_exceeded(exc: Exception) -> bool:
-    """Detect daily quota limit exceeded (429 TPD error).
-    
-    Different from transient rate limits, TPD (Tokens Per Day) limits are permanent
-    for the day and cannot be resolved by waiting. When hit, the model should be
-    skipped for the rest of the session but can be retried tomorrow.
-    
-    TPD errors are a specific type of 429 (Too Many Requests) that mention:
-    - 'tokens per day' or 'TPD'
-    - 'daily' + ('quota' or 'limit')
-    - 'exceeded' + ('daily' or 'quota')
-    """
     text = str(exc).lower()
-    
-    # Detect TPD-specific 429 errors
     tpd_markers = (
         "tokens per day",
         "tokens_per_day",
@@ -162,44 +115,31 @@ def _is_quota_exceeded(exc: Exception) -> bool:
         "daily quota",
         "daily token",
         "daily limit",
+        "quota exceeded",
+        "resource exhausted",
     )
-    
-    # Must be a 429 error containing TPD indicators
     has_quota_indicator = any(marker in text for marker in tpd_markers)
     is_429 = "429" in text or "too many requests" in text
-    
     return is_429 and has_quota_indicator
 
 
 def _invoke_with_backoff(llm: Any, messages: list[Any], role: str) -> Any:
-    """Invoke LLM with backoff for transient errors, but NOT for quota exhaustion.
-    
-    CRITICAL: TPD (Tokens Per Day) quota errors are NOT transient.
-    They should NOT trigger backoff/retry; instead, they should fail immediately
-    so invoke_with_role_fallback can rotate to a different model.
-    
-    Transient errors (429 TPM, timeouts, etc.) DO get retry + backoff.
-    Quota errors (429 TPD) should fail fast for model rotation.
-    """
     delay = LLM_BACKOFF_INITIAL_SECONDS
     last_exc: Exception | None = None
 
     for attempt in range(1, max(1, LLM_MAX_ATTEMPTS) + 1):
         try:
             return llm.invoke(messages)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             last_exc = exc
-            
-            # CRITICAL: Do NOT retry TPD quota exhaustion errors
-            # These need immediate model rotation, not backoff
+
             if _is_quota_exceeded(exc):
-                print(f"[{role}] [NO_RETRY] TPD quota exhausted - skipping backoff for immediate rotation")
+                print(f"[{role}] [NO_RETRY] Quota exhausted - skipping backoff for immediate rotation")
                 raise
-            
-            # For other errors, check if they're transient
+
             if not _is_transient_error(exc) or attempt >= max(1, LLM_MAX_ATTEMPTS):
                 raise
-            print(f"[{role}] [RETRY] transient LLM error on attempt {attempt}: {exc}")
+            print(f"[{role}] [RETRY] transient error on attempt {attempt}: {exc}")
             time.sleep(min(delay, LLM_BACKOFF_MAX_SECONDS))
             delay = min(delay * LLM_BACKOFF_MULTIPLIER, LLM_BACKOFF_MAX_SECONDS)
 
@@ -217,33 +157,21 @@ def invoke_with_role_fallback(
     max_tokens: int | None = None,
     tools: list[Any] | None = None,
 ) -> tuple[Any, str]:
-    """Invoke Groq model with role-level fallback and resilient handling.
-    
-    Features:
-    - Role-level model persistence (remembers which model worked for a role)
-    - Fallback to next candidate on any error
-    - Adaptive downscaling: removes permanently decommissioned models (400 errors)
-    - Transient error retry with exponential backoff
-    - Rate limiting: tracks tokens used and waits before calls if approaching limits (Phase 4)
-    """
-    if ChatGroq is None:
-        raise RuntimeError("langchain-groq is not installed")
-    if not GROQ_API_KEY:
-        raise RuntimeError("GROQ_API_KEY is not configured")
+    if ChatOpenAI is None:
+        raise RuntimeError("langchain-openai is not installed")
 
-    # Filter out decommissioned and quota-exceeded models
     excluded = _DECOMMISSIONED_MODELS | _QUOTA_EXCEEDED_MODELS
     available_candidates = [m for m in candidates if m not in excluded]
     if not available_candidates:
         if _DECOMMISSIONED_MODELS:
             raise RuntimeError(
-                f"{role}: all model candidates have been decommissioned: {_DECOMMISSIONED_MODELS}. "
-                "Please update model configuration in config.py"
+                f"{role}: all model candidates decommissioned: {_DECOMMISSIONED_MODELS}. "
+                "Update model configuration in config.py"
             )
         if _QUOTA_EXCEEDED_MODELS:
             raise RuntimeError(
-                f"{role}: all models exceeded their daily quota: {_QUOTA_EXCEEDED_MODELS}. "
-                "Please try again tomorrow or use a different API key."
+                f"{role}: all models exceeded daily quota: {_QUOTA_EXCEEDED_MODELS}. "
+                "Try again later or use a different API key."
             )
         raise RuntimeError(f"{role}: no model candidates configured")
 
@@ -251,85 +179,66 @@ def invoke_with_role_fallback(
     selected = _SELECTED_MODEL_BY_ROLE.get(role)
     if selected and selected in ordered:
         ordered = [selected] + [m for m in ordered if m != selected]
-    
-    # Gold Standard Model Alias Resolution: Prevent "Model Drift" by checking
-    # _MODEL_ALIASES before attempting any API call. If a model is known retired,
-    # auto-redirect to fallback WITHOUT failing first.
-    # This ensures zero downtime even if config.py still references old model IDs.
-    mapped_ordered = []
-    for model in ordered:
-        if model in _MODEL_ALIASES:
-            fallback = _MODEL_ALIASES[model]
-            if fallback != model:  # Only log if actually redirecting (not just upgrading)
-                print(f"[{role}] Model '{model}' is deprecated. Auto-redirecting to '{fallback}'")
-            if fallback not in mapped_ordered:  # Avoid duplicates
-                mapped_ordered.append(fallback)
-        else:
-            mapped_ordered.append(model)
-    ordered = mapped_ordered
 
-    # Pre-call rate limit check (Phase 4: TokenBucket)
     estimated_input_tokens = sum(len(str(msg)) // 4 for msg in messages)
-    estimated_total_tokens = estimated_input_tokens + (max_tokens or 1024)
-    
+    estimated_total_tokens = estimated_input_tokens + (max_tokens or 4096)
+
     rate_limit_status = get_rate_limit_status()
     if rate_limit_status.get("percent_used", 0) >= 70:
-        print(f"[{role}] [RATE_LIMIT] Using {rate_limit_status.get('percent_used', 0):.1f}% of TPM limit. " 
-              f"Waiting for capacity...")
+        print(
+            f"[{role}] [RATE_LIMIT] Using {rate_limit_status.get('percent_used', 0):.1f}% "
+            f"of TPM limit. Waiting for capacity..."
+        )
         wait_seconds = wait_for_capacity(estimated_total_tokens)
         if wait_seconds > 0:
             print(f"[{role}] [RATE_LIMIT] Waited {wait_seconds:.1f}s for capacity")
 
     last_exc: Exception | None = None
     for model_name in ordered:
+        api_key = _resolve_api_key(model_name)
+        if not api_key:
+            print(f"[{role}] [SKIP] No API key configured for model '{model_name}'")
+            continue
+
         try:
-            llm = ChatGroq(
+            llm = ChatOpenAI(
                 model=model_name,
-                api_key=GROQ_API_KEY,
+                api_key=api_key,
+                base_url=NVIDIA_BASE_URL,
                 temperature=temperature,
                 max_tokens=max_tokens,
             )
             llm_to_call = llm.bind_tools(tools) if tools else llm
             response = _invoke_with_backoff(llm_to_call, messages, role)
-            
-            # Record tokens used (Phase 4: TokenBucket)
-            # Estimate output tokens from response content
+
             output_text = getattr(response, "content", "")
             estimated_output_tokens = len(str(output_text)) // 4
             total_tokens_used = estimated_input_tokens + estimated_output_tokens
             record_tokens_used(total_tokens_used)
-            
+
             _SELECTED_MODEL_BY_ROLE[role] = model_name
             return response, model_name
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             last_exc = exc
-            
-            # Phase 4A: Detect permanent decommissioning (400 error)
+
             if _is_model_decommissioned(exc):
-                print(f"[{role}] [DECOMMISSIONED] Model '{model_name}' is permanently unavailable (400 error)")
-                print(f"[{role}] [DECOMMISSIONED] Removing from session candidates: {model_name}")
+                print(f"[{role}] [DECOMMISSIONED] Model '{model_name}' permanently unavailable")
                 _DECOMMISSIONED_MODELS.add(model_name)
-                # Clear selected model cache if this model was selected
                 if _SELECTED_MODEL_BY_ROLE.get(role) == model_name:
                     del _SELECTED_MODEL_BY_ROLE[role]
-                continue  # Try next candidate
-            
-            # Phase 4B: Detect daily quota exceeded (429 TPD error) - skip for session
+                continue
+
             if _is_quota_exceeded(exc):
-                print(f"[{role}] [QUOTA_EXCEEDED] Model '{model_name}' hit daily TPD limit")
-                print(f"[{role}] [QUOTA_EXCEEDED] Skipping for rest of session: {model_name}")
+                print(f"[{role}] [QUOTA_EXCEEDED] Model '{model_name}' hit daily limit")
                 _QUOTA_EXCEEDED_MODELS.add(model_name)
-                # Clear selected model cache if this model was selected
                 if _SELECTED_MODEL_BY_ROLE.get(role) == model_name:
                     del _SELECTED_MODEL_BY_ROLE[role]
-                continue  # Try next candidate (don't retry same model)
-            
-            # Detect temporary unavailability or unsupported model errors
+                continue
+
             if _is_model_unavailable(exc):
                 print(f"[{role}] [FALLBACK] model '{model_name}' temporarily unavailable: {exc}")
                 continue
-            
-            # For other errors, re-raise (transient errors will be retried in _invoke_with_backoff)
+
             raise
 
     if last_exc is None:

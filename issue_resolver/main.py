@@ -14,6 +14,7 @@ from __future__ import annotations
 from issue_resolver.graph import build_graph
 from issue_resolver.state import AgentState
 from issue_resolver.utils.logger import get_token_estimate
+from issue_resolver.config import CODER_RETRY_BUDGET
 import json
 
 
@@ -34,14 +35,11 @@ Environment: Python 3.12, Ubuntu 24.04
 
 def main() -> None:
     print("=" * 60)
-    print("  Multi-Agent Issue Resolver -- Phase 2 Smoke Test")
+    print("  Multi-Agent Issue Resolver -- Smoke Test")
     print("=" * 60)
 
-    # Build & compile the graph
     app = build_graph()
 
-    # Prepare the initial state
-    # Default repo path -- override with env var or CLI arg in the future
     repo_path = "./sandbox_workspace"
 
     initial_state: AgentState = {
@@ -55,6 +53,10 @@ def main() -> None:
         "next_step": "",
         "iterations": 0,
         "is_resolved": False,
+        "coder_retry_budget": CODER_RETRY_BUDGET,
+        "failure_summary": "",
+        "ast_validation_passed": True,
+        "ast_error_detail": "",
         "environment_config": {},
         "contribution_guidelines": "",
         "history": [],

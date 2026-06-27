@@ -5,7 +5,7 @@ description = "Multi-Agent GitHub Issue Resolution System using LangGraph and Ol
 requires-python = ">=3.12"
 dependencies = [
     "langgraph",
-    "langchain-groq",
+    "langchain-openai",
     "psycopg[binary]",
     "fastapi",
     "uvicorn",
@@ -22,3 +22,6 @@ dev = [
     "pytest",
     "ruff",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
