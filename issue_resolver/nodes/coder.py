@@ -3,6 +3,7 @@ from __future__ import annotations
 import difflib
 import json
 import re
+from pathlib import Path
 
 from langchain_core.messages import SystemMessage, HumanMessage
 
@@ -12,62 +13,36 @@ from issue_resolver.config import CODER_MODEL_CANDIDATES, CODER_MAX_RETRIES
 from issue_resolver.llm_utils import invoke_with_role_fallback, calculate_max_tokens
 
 
-_SYSTEM_PROMPT = r"""\
-You are a code fixing assistant. Output a minimal, surgical fix.
+_SYSTEM_PROMPT = r"""You are a code fixing assistant. Output a minimal, surgical fix.
 
-You MUST output your fix in ONE of these two formats:
+You MUST specify the file path you are editing using "File: <path>", followed by one or more SEARCH/REPLACE blocks.
+Format:
 
-FORMAT A — Unified Diff (PREFERRED):
-```diff
---- a/path/to/file.ext
-+++ b/path/to/file.ext
-@@ -LINE,COUNT +LINE,COUNT @@
- context line
--old line to remove
-+new line to add
- context line
-```
-
-FORMAT B — JSON Patch (FALLBACK):
-```json
-{
-  "file": "path/to/file.ext",
-  "hunks": [
-    {
-      "start_line": 42,
-      "delete_lines": ["    old_code_line_1", "    old_code_line_2"],
-      "insert_lines": ["    new_code_line_1", "    new_code_line_2"]
-    }
-  ]
-}
-```
+File: path/to/file.ext
+<<<<<<< SEARCH
+[exact text to find]
+=======
+[replacement text]
+>>>>>>> REPLACE
 
 CRITICAL RULES:
-1. READ the issue carefully and identify what needs fixing
-2. Keep changes MINIMAL — only modify the lines that fix the bug
-3. Preserve exact indentation from the original source code
-4. Output ONLY the diff or JSON patch block — no extra commentary
-5. For unified diffs, include 3 lines of context around changes
-6. For JSON patches, use exact line content from the source file
-7. The file path must match one of the provided source files
+1. Identify the file path and specify it with "File: path/to/file.ext"
+2. Output ONLY the File header and the SEARCH/REPLACE blocks — no extra commentary.
+3. Keep changes minimal.
+4. The search block must match the file content exactly, including whitespace.
 """
 
-_DEBUGGING_MODE_PROMPT = r"""\
-
+_DEBUGGING_MODE_PROMPT = r"""
 DEBUGGING MODE ACTIVATED
-════════════════════════════════════════
 Your previous fix attempt had the following error(s):
 
 ERROR CONTEXT: {error_context}
+FAILED LINES: {error_lines}
 
 STRATEGY FOR THIS RETRY:
-1. The error indicates the failure is at specific line(s): {error_lines}
-2. Re-examine the source code at those exact lines
-3. Check if your previous diff introduced a syntax error
-4. Verify your fix addresses the root cause
-5. Ensure line numbers and context lines match the actual source
-
-Remember: The test MUST pass after your fix is applied.
+1. Re-examine the source code at those lines
+2. Verify your SEARCH block matches the target file exactly, including leading spaces
+3. Output the search/replace block in the correct format
 """
 
 
@@ -314,7 +289,7 @@ def coder_node(state: AgentState) -> dict:
         )
 
     base_parts.append(
-        "\nProvide your fix as a unified diff (```diff block) or JSON patch (```json block)."
+        "\nProvide your fix as one or more SEARCH/REPLACE blocks. Make sure to specify the file path you are editing using 'File: path/to/file.ext' before the blocks."
     )
 
     history: list[dict] = []
@@ -367,7 +342,7 @@ def coder_node(state: AgentState) -> dict:
                     content=(
                         f"Your previous output could not be applied: {last_failure}\n"
                         f"Try again with the source context above. "
-                        f"Output ONLY a ```diff or ```json block."
+                        f"Output SEARCH/REPLACE blocks formatted with 'File: <path>'."
                     )
                 )
             )
@@ -397,28 +372,39 @@ def coder_node(state: AgentState) -> dict:
         print(f"[Coder] LLM returned {len(raw)} chars")
         history.extend(append_to_history("Coder", "Generation", raw, max_length=800))
 
-        diff = _parse_unified_diff(raw)
-        if diff:
-            print(f"[Coder] [OK] Parsed unified diff ({len(diff)} chars)")
-            break
+        target_file = None
+        match = re.search(r"File:\s*([^\n\r]+)", raw, re.IGNORECASE)
+        if match:
+            target_file = _match_path(match.group(1).strip(), known_paths)
+        else:
+            for p in known_paths:
+                if p in raw:
+                    target_file = p
+                    break
+            if not target_file and len(known_paths) == 1:
+                target_file = known_paths[0]
 
-        diff = _parse_json_patch(raw, file_info, known_paths)
-        if diff:
-            print(f"[Coder] [OK] Parsed JSON patch → diff ({len(diff)} chars)")
-            break
+        if not target_file or target_file not in file_info:
+            last_failure = f"Could not determine target file from output. Please specify 'File: <path>' before the search/replace block."
+            if attempt < len(temperatures) - 1:
+                continue
+            else:
+                break
 
-        last_failure = "Could not parse unified diff or JSON patch from LLM output"
-        if attempt < len(temperatures) - 1:
-            print(f"[Coder] [RETRY] {last_failure} — will retry with higher temperature")
+        from issue_resolver.utils.patch_engine import parse_and_apply_blocks
+        res = parse_and_apply_blocks(str(Path(state.get("repo_path", ".")) / target_file), raw)
+        if res.get("success"):
+            with open(str(Path(state.get("repo_path", ".")) / target_file), "r", encoding="utf-8", errors="ignore") as f:
+                modified_content = f.read()
+            diff = _make_diff(file_info[target_file], modified_content, target_file)
+            break
+        else:
+            last_failure = res.get("hint", "Failed to apply block.")
+            if attempt < len(temperatures) - 1:
+                continue
 
     if not diff:
-        print(f"[Coder] [ERROR] All {len(temperatures)} attempts failed")
-        error_msg = (
-            f"CODE FIX FAILED after {len(temperatures)} attempts.\n"
-            f"Last failure: {last_failure}\n\n"
-            f"REQUIRED FORMAT: ```diff or ```json block with unified diff or JSON patch."
-        )
-        history.extend(append_to_history("Coder", "Parse Failed", error_msg, max_length=500))
+        error_msg = f"Failed to apply proposed fix: {last_failure}"
         return {"errors": error_msg, "history": history}
 
     print(f"[Coder] Final diff preview:\n{diff[:400]}")

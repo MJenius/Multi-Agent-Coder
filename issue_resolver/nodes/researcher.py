@@ -282,6 +282,46 @@ def _get_top_file_from_search(search_result: str) -> str | None:
     return best[0]
 
 
+def _manage_context_budget(file_context: list[str]) -> list[str]:
+    seen = {}
+    for snippet in file_context:
+        m = re.match(r"^# --- (?:\[HINTED\] )?file: (.+?) ---", snippet)
+        if m:
+            path = m.group(1)
+            if path in seen:
+                del seen[path]
+            seen[path] = snippet
+        else:
+            seen[snippet] = snippet
+    unique_snippets = list(seen.values())
+    allowed_snippets = []
+    current_length = 0
+    limit = 12000
+    for snippet in reversed(unique_snippets):
+        if current_length >= limit:
+            m = re.match(r"^(# --- (?:\[HINTED\] )?file: .+? ---)", snippet)
+            if m:
+                allowed_snippets.append(m.group(1) + "\n[...truncated]")
+            else:
+                allowed_snippets.append("[...truncated]")
+        elif current_length + len(snippet) > limit:
+            available = limit - current_length
+            m = re.match(r"^(# --- (?:\[HINTED\] )?file: .+? ---)(.*)$", snippet, re.DOTALL)
+            if m:
+                header = m.group(1)
+                body = m.group(2)
+                keep_body_len = max(0, available - len(header) - len("\n[...truncated]"))
+                truncated_body = body[:keep_body_len]
+                allowed_snippets.append(header + truncated_body + "\n[...truncated]")
+            else:
+                allowed_snippets.append(snippet[:available] + "[...truncated]")
+            current_length = limit
+        else:
+            allowed_snippets.append(snippet)
+            current_length += len(snippet)
+    return list(reversed(allowed_snippets))
+
+
 def researcher_node(state: AgentState) -> dict:
     print("[Researcher] Starting codebase exploration...")
 
@@ -400,6 +440,7 @@ def researcher_node(state: AgentState) -> dict:
                 f"Collected {len(snippets)} snippets (from hints). Read {files_read} files.",
             )
         )
+        snippets = _manage_context_budget(snippets)
         return_dict: dict = {
             "file_context": snippets,
             "history": history_additions,
@@ -696,6 +737,7 @@ def researcher_node(state: AgentState) -> dict:
         )
     )
 
+    snippets = _manage_context_budget(snippets)
     return_dict: dict = {
         "file_context": snippets,
         "history": history_additions,

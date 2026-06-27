@@ -163,12 +163,13 @@ if st.button("🚀 Start Resolution Process"):
         stop_container.empty()
         thought_container.empty()
 
-        # Store in session state for persistence
-        # Compute is_resolved from evidence as fallback (respects tri-state validation)
         vs = final_state.get("validation_status", "")
         if final_state.get("proposed_fix") and not final_state.get("errors"):
-            if vs in ("passed", "inconclusive", ""):
+            if vs == "passed":
                 final_state["is_resolved"] = True
+            elif vs == "inconclusive":
+                final_state["is_resolved"] = False
+                final_state["resolution_note"] = "No test suite was found"
             
         # Debug: log final state keys for troubleshooting
         print(f"[DEBUG] Final state keys: {list(final_state.keys())}")

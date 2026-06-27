@@ -178,17 +178,9 @@ def smart_search(
     prefer_core_lib: bool = True,
     max_results: int = 50,
 ) -> list[dict]:
-    """
-    Perform smart search: try ripgrep with variants, then fallback to basic grep.
-    
-    Returns list of matches ordered by relevance.
-    """
-    
-    # First, try ripgrep with variants
     if is_ripgrep_available():
         variants = generate_search_variants(identifier)
         all_matches = {}
-        
         for variant in variants:
             matches = search_with_ripgrep(
                 variant,
@@ -196,19 +188,26 @@ def smart_search(
                 prefer_core_lib=prefer_core_lib,
                 max_results=max_results,
             )
-            
             for match in matches:
-                # Use file path as unique key to avoid duplicates
                 key = (match['file'], match['line'])
                 if key not in all_matches:
                     all_matches[key] = match
-        
-        # Convert back to list and sort
         results = list(all_matches.values())
-        results.sort(key=lambda x: (x['priority'], x['file'], x['line']))
-        return results[:max_results]
-    
-    # Fallback: use basic grep with word boundary
+        scored_results = []
+        for match in results:
+            score = 1.0
+            file_path = match["file"].replace("\\", "/").lower()
+            if any(p in file_path for p in ["/test", "/tests", "/spec", "/fixtures", "/mocks"]):
+                score *= 0.3
+            if any(p in file_path for p in ["/src/", "/lib/", "/core/"]):
+                score *= 2.0
+            content = match["content"]
+            if "def " in content or "class " in content or "async def " in content:
+                score *= 1.5
+            match["score"] = score
+            scored_results.append(match)
+        scored_results.sort(key=lambda x: x["score"], reverse=True)
+        return scored_results[:15]
     return []
 
 
