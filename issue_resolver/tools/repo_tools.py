@@ -20,6 +20,7 @@ from pathlib import Path
 from langchain_core.tools import tool
 from issue_resolver.config import SANDBOX_WORKSPACE_DIR
 from issue_resolver.runtime_context import get_environment_config
+from issue_resolver.tools.view_engine import file_viewer
 
 try:
     import pathspec
@@ -688,4 +689,4 @@ def generate_symbol_map(directory: str) -> str:
 # ---------------------------------------------------------------------------
 # Convenience list for .bind_tools()
 # ---------------------------------------------------------------------------
-REPO_TOOLS = [list_files, search_code, read_file, generate_repo_map, get_symbol_definition, generate_symbol_map]
+REPO_TOOLS = [list_files, search_code, read_file, generate_repo_map, get_symbol_definition, generate_symbol_map, file_viewer]

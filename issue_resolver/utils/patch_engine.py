@@ -63,4 +63,79 @@ def parse_and_apply_blocks(file_path: str, llm_output: str) -> dict:
             return res
     with open(file_path, "w", encoding="utf-8", newline="") as f:
         f.write(engine.file_content)
+
+    import os
+    import subprocess
+    from issue_resolver.tools.sandbox_tools import get_sandbox_container
+
+    lint_failed = False
+    lint_output = ""
+    sandbox = get_sandbox_container()
+
+    if sandbox:
+        from issue_resolver.config import SANDBOX_WORKSPACE_DIR
+        sandbox_workspace_abs = os.path.abspath(SANDBOX_WORKSPACE_DIR)
+        file_path_abs = os.path.abspath(file_path)
+        try:
+            rel_path = os.path.relpath(file_path_abs, sandbox_workspace_abs).replace("\\", "/")
+        except ValueError:
+            rel_path = os.path.basename(file_path)
+
+        res_lint = sandbox.exec_run(f"ruff check {rel_path}", workdir="/workspace")
+        if res_lint.exit_code != 0:
+            output = res_lint.output.decode("utf-8", errors="ignore")
+            if "not found" in output.lower() or "command not found" in output.lower() or res_lint.exit_code == 127:
+                res_lint = sandbox.exec_run(f"python -m py_compile {rel_path}", workdir="/workspace")
+                if res_lint.exit_code != 0:
+                    lint_failed = True
+                    lint_output = res_lint.output.decode("utf-8", errors="ignore")
+            else:
+                lint_failed = True
+                lint_output = output
+
+        if lint_failed:
+            sandbox.exec_run(f"git checkout -- {rel_path}", workdir="/workspace")
+            return {"success": False, "hint": f"Linter validation failed:\n{lint_output.strip()}"}
+    else:
+        try:
+            res_lint = subprocess.run(
+                ["ruff", "check", file_path],
+                capture_output=True,
+                text=True
+            )
+            if res_lint.returncode != 0:
+                lint_failed = True
+                lint_output = res_lint.stdout + "\n" + res_lint.stderr
+        except FileNotFoundError:
+            try:
+                res_lint = subprocess.run(
+                    ["python", "-m", "py_compile", file_path],
+                    capture_output=True,
+                    text=True
+                )
+                if res_lint.returncode != 0:
+                    lint_failed = True
+                    lint_output = res_lint.stdout + "\n" + res_lint.stderr
+            except Exception:
+                pass
+        if lint_failed:
+            curr_dir = os.path.dirname(os.path.abspath(file_path))
+            git_root = None
+            while curr_dir:
+                if os.path.exists(os.path.join(curr_dir, ".git")):
+                    git_root = curr_dir
+                    break
+                parent = os.path.dirname(curr_dir)
+                if parent == curr_dir:
+                    break
+                curr_dir = parent
+            cwd = git_root if git_root else os.path.dirname(os.path.abspath(file_path))
+            subprocess.run(
+                ["git", "checkout", "--", file_path],
+                cwd=cwd,
+                capture_output=True,
+                text=True
+            )
+            return {"success": False, "hint": f"Linter validation failed:\n{lint_output.strip()}"}
+
     return {"success": True}

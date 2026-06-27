@@ -18,6 +18,7 @@ from issue_resolver.tools import (
     read_file,
     generate_repo_map,
     get_symbol_definition,
+    file_viewer
 )
 
 
@@ -27,6 +28,7 @@ _TOOL_MAP = {
     "read_file": read_file,
     "generate_repo_map": generate_repo_map,
     "get_symbol_definition": get_symbol_definition,
+    "file_viewer": file_viewer,
 }
 
 _SYSTEM_PROMPT = """\
@@ -324,6 +326,7 @@ def _manage_context_budget(file_context: list[str]) -> list[str]:
 
 def researcher_node(state: AgentState) -> dict:
     print("[Researcher] Starting codebase exploration...")
+    state_updates = {}
 
     repo_path = state.get("repo_path", ".")
     issue_text = state.get("issue", "(no issue provided)")
@@ -444,6 +447,7 @@ def researcher_node(state: AgentState) -> dict:
         return_dict: dict = {
             "file_context": snippets,
             "history": history_additions,
+            **state_updates
         }
         if contribution_guidelines:
             return_dict["contribution_guidelines"] = contribution_guidelines
@@ -619,6 +623,10 @@ def researcher_node(state: AgentState) -> dict:
                     messages.append(ToolMessage(content=result, tool_call_id=call_id))
                     continue
 
+            if fn_name == "file_viewer":
+                fn_args["current_view_file"] = state.get("current_view_file")
+                fn_args["current_view_line"] = state.get("current_view_line", 1)
+
             tool_fn = _TOOL_MAP.get(fn_name)
             if tool_fn is None:
                 result = f"Unknown tool '{fn_name}'."
@@ -654,6 +662,36 @@ def researcher_node(state: AgentState) -> dict:
                             total_lines += lines_in_auto + 1
                     except Exception:
                         pass
+
+            if fn_name == "file_viewer":
+                if not isinstance(result, str) or result.startswith(("Error", "Tool error")):
+                    messages.append(ToolMessage(content=str(result), tool_call_id=call_id))
+                    continue
+                try:
+                    parsed = json.loads(result)
+                    output_text = parsed.get("output", "")
+                    new_view_file = parsed.get("new_view_file")
+                    new_view_line = parsed.get("new_view_line", 1)
+                    state_updates["current_view_file"] = new_view_file
+                    state_updates["current_view_line"] = new_view_line
+                    messages.append(ToolMessage(content=output_text, tool_call_id=call_id))
+                    if new_view_file and not output_text.startswith("ERROR"):
+                        file_label = new_view_file
+                        snippet = f"# --- file: {file_label} ---\n{output_text}"
+                        existing_idx = -1
+                        for idx, snip in enumerate(snippets):
+                            if f"file: {file_label}" in snip:
+                                existing_idx = idx
+                                break
+                        if existing_idx != -1:
+                            snippets[existing_idx] = snippet
+                        else:
+                            snippets.append(snippet)
+                            files_read += 1
+                        total_lines += output_text.count("\n") + 1
+                except Exception as exc:
+                    messages.append(ToolMessage(content=f"Error parsing file_viewer: {exc}", tool_call_id=call_id))
+                continue
 
             messages.append(ToolMessage(content=str(result), tool_call_id=call_id))
 
@@ -741,6 +779,7 @@ def researcher_node(state: AgentState) -> dict:
     return_dict: dict = {
         "file_context": snippets,
         "history": history_additions,
+        **state_updates
     }
     if contribution_guidelines:
         return_dict["contribution_guidelines"] = contribution_guidelines

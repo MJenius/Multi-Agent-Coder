@@ -13,6 +13,8 @@ class AgentState(TypedDict):
 
     file_context: list[str]
     symbol_map: str
+    current_view_file: str
+    current_view_line: int
 
     plan: str
     plan_iteration: int

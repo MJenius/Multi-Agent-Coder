@@ -50,7 +50,14 @@ def _strip_line_numbers(text: str) -> str:
     out = []
     for line in text.split("\n"):
         m = re.match(r"^\d+: (.*)$", line)
-        out.append(m.group(1) if m else line)
+        if m:
+            out.append(m.group(1))
+            continue
+        m = re.match(r"^\s*\d+\s*\|\s*(.*)$", line)
+        if m:
+            out.append(m.group(1))
+            continue
+        out.append(line)
     return "\n".join(out)
 
 

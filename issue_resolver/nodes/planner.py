@@ -81,28 +81,6 @@ def planner_node(state: AgentState) -> dict:
     available_for_context = context_window - 4000
 
     truncated_symbol_map = symbol_map
-    if symbol_map and file_context:
-        context_files = set()
-        for item in file_context:
-            if isinstance(item, str) and "File:" in item:
-                file_path = item.split("File:")[1].split("\n")[0].strip()
-                context_files.add(file_path)
-
-        if context_files:
-            symbol_lines = symbol_map.split("\n")
-            relevant_symbols = [
-                line
-                for line in symbol_lines
-                if any(fname in line for fname in context_files)
-            ]
-            if relevant_symbols:
-                truncated_symbol_map = "\n".join(relevant_symbols[:30])
-            else:
-                truncated_symbol_map = "\n".join(symbol_lines[:20])
-        else:
-            truncated_symbol_map = "\n".join(symbol_map.split("\n")[:20])
-    elif symbol_map:
-        truncated_symbol_map = "\n".join(symbol_map.split("\n")[:20])
 
     if truncated_symbol_map:
         context_parts.append(f"## Symbol Map (Top Functions/Classes)\n{truncated_symbol_map}")
@@ -171,6 +149,7 @@ Based on the issue and repository context above, write a detailed fix strategy.
         return {
             "errors": "Could not extract plan from LLM output",
             "iterations": iterations + 1,
+            "file_context": file_context,
             "history": append_to_history("Planner", "Parse Failed", raw[:300]),
         }
 
@@ -179,5 +158,6 @@ Based on the issue and repository context above, write a detailed fix strategy.
         "plan": plan,
         "plan_iteration": plan_iteration + 1,
         "iterations": iterations + 1,
+        "file_context": file_context,
         "history": append_to_history("Planner", "Strategy Generated", plan[:400]),
     }

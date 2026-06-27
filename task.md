@@ -1,0 +1,10 @@
+- [x] Update AgentState schema in `issue_resolver/state.py`
+- [x] Implement stateful windowed file viewer tool in `issue_resolver/tools/view_engine.py`
+- [x] Register `file_viewer` tool in `issue_resolver/tools/repo_tools.py` and `issue_resolver/tools/__init__.py`
+- [x] Integrate file_viewer runner and state capturing in `issue_resolver/nodes/researcher.py`
+- [x] Implement container-aware linter gate and auto-reversion check in `issue_resolver/utils/patch_engine.py`
+- [x] Implement AST codebase mapping tool in `issue_resolver/utils/code_mapper.py`
+- [x] Integrate AST mapper generator in `issue_resolver/nodes/setup.py`
+- [x] Update `issue_resolver/nodes/planner.py` to preserve context and symbol map
+- [x] Refactor LangGraph sub-graphs in `issue_resolver/graph.py`
+- [x] Verify that graph compiles and test suites build successfully

@@ -6,7 +6,8 @@ from issue_resolver.tools.repo_tools import (
     read_file, 
     generate_repo_map,
     get_symbol_definition,
-    REPO_TOOLS
+    REPO_TOOLS,
+    file_viewer
 )
 
-__all__ = ["list_files", "search_code", "read_file", "generate_repo_map", "get_symbol_definition", "REPO_TOOLS"]
+__all__ = ["list_files", "search_code", "read_file", "generate_repo_map", "get_symbol_definition", "REPO_TOOLS", "file_viewer"]

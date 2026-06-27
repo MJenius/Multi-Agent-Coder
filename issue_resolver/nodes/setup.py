@@ -156,9 +156,8 @@ def setup_node(state: AgentState) -> dict:
 
     set_environment_config(env_config)
     
-    # Generate symbol map for Planner context (capped at 100 symbols)
-    # Use internal implementation to avoid StructuredTool wrapping issues
-    symbol_map = _generate_symbol_map_impl(str(root))
+    from issue_resolver.utils.code_mapper import CodeMapper
+    symbol_map = CodeMapper.generate_repo_map(str(root))
     
     history_msg = f"Detected {env_type} (framework={env_config['test_framework']})"
     if len(symbol_map) > 20:  # Non-empty symbol map
