@@ -80,3 +80,13 @@ def test_knowledge_graph_construction() -> None:
     # Test callers/callees
     assert "src/utils.py::Calculator.add" in graph.get_callees("main")
     assert "src/main.py::main" in graph.get_callers("add")
+
+    # Test text summary
+    summary_default = graph.to_text_summary()
+    assert "Repository Knowledge Graph" in summary_default
+    assert "src/main.py" in summary_default
+
+    summary_limit = graph.to_text_summary(limit=2)
+    # The default header + entrypoints + test modules + config files + blank lines is already > 2, so it should truncate early.
+    assert "more modules" in summary_limit or len(summary_limit.splitlines()) < len(summary_default.splitlines())
+

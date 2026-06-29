@@ -82,6 +82,22 @@ Output ONLY the C# test code in a ```csharp code block. No explanation.""",
 
 
 def testgen_node(state: AgentState) -> dict:
+    verification_type = state.get("verification_type", "runtime tests")
+    if verification_type != "runtime tests":
+        print(f"[TestGen] [SKIP] Skipping test generation for verification type: {verification_type}")
+        return {
+            "test_code": "",
+            "test_file_path": "",
+            "test_framework_used": "none",
+            "test_runs_initially": True,
+            "iterations": state.get("iterations", 0) + 1,
+            "history": append_to_history(
+                "TestGen",
+                "Skipped",
+                f"Skipped test generation for verification type {verification_type}."
+            ),
+        }
+
     print("[TestGen] Generating reproduction test...")
 
     issue_text = state.get("issue", "(no issue)")

@@ -71,6 +71,27 @@ def append_to_history(node_name: str, action: str, content: str, max_length: int
         "content": truncated_content,
     }
     
+    # 3. Streamlit live updates if running in Streamlit
+    try:
+        import streamlit as st
+        # check if we are in streamlit context
+        if st.runtime.exists() and "thought_container" in st.session_state:
+            # Format cleanly with HTML since we are inside a <div>
+            safe_content = truncated_content.replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br>")
+            entry_html = f"<strong>[{node_name}]</strong> ({action}): {safe_content}<br><br>"
+            if "thought_log" in st.session_state:
+                st.session_state.thought_log += entry_html
+            else:
+                st.session_state.thought_log = entry_html
+            
+            # Live render to container
+            st.session_state.thought_container.markdown(
+                f'<div class="thought-trace">{st.session_state.thought_log}</div>',
+                unsafe_allow_html=True
+            )
+    except Exception:
+        pass
+        
     return [entry]
 
 

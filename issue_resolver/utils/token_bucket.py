@@ -20,26 +20,29 @@ from typing import Optional
 
 
 class TokenBucket:
-    """Track token usage and enforce rate limits."""
+    """Track token and request usage to enforce rate limits."""
     
     DEFAULT_TPM_LIMIT = 80000
+    DEFAULT_RPM_LIMIT = 35
     MINUTE_WINDOW = 60.0
     
-    def __init__(self, tpm_limit: int = DEFAULT_TPM_LIMIT, window_seconds: float = MINUTE_WINDOW):
-        """Initialize token bucket.
+    def __init__(self, tpm_limit: int = DEFAULT_TPM_LIMIT, rpm_limit: int = DEFAULT_RPM_LIMIT, window_seconds: float = MINUTE_WINDOW):
+        """Initialize token bucket with both TPM and RPM limits.
         
         Args:
             tpm_limit: Tokens per minute limit
+            rpm_limit: Requests per minute limit
             window_seconds: Sliding window duration (default: 60 seconds = 1 minute)
         """
         self.tpm_limit = tpm_limit
+        self.rpm_limit = rpm_limit
         self.window_seconds = window_seconds
         
         # Sliding window implementation
         self.tokens_used = []  # List of (timestamp, token_count) tuples
     
     def can_spend(self, tokens: int) -> bool:
-        """Check if tokens can be spent without exceeding limit."""
+        """Check if tokens and requests can be spent without exceeding limits."""
         now = time.time()
         
         # Remove old entries outside the window
@@ -48,19 +51,23 @@ class TokenBucket:
             if now - ts < self.window_seconds
         ]
         
-        # Check if spending these tokens would exceed limit
+        # Enforce RPM limit
+        if len(self.tokens_used) >= self.rpm_limit:
+            return False
+            
+        # Enforce TPM limit
         total_in_window = sum(count for _, count in self.tokens_used)
         return (total_in_window + tokens) <= self.tpm_limit
     
     def spend(self, tokens: int) -> bool:
-        """Attempt to spend tokens. Returns True if successful, False if rate-limited."""
+        """Attempt to spend tokens/request. Returns True if successful, False if rate-limited."""
         if self.can_spend(tokens):
             self.tokens_used.append((time.time(), tokens))
             return True
         return False
     
     def get_token_usage(self) -> dict:
-        """Get current token usage stats."""
+        """Get current token and request usage stats."""
         now = time.time()
         
         # Remove old entries
@@ -71,19 +78,27 @@ class TokenBucket:
         
         total_used = sum(count for _, count in self.tokens_used)
         remaining = self.tpm_limit - total_used
-        percent_used = (total_used / self.tpm_limit) * 100 if self.tpm_limit > 0 else 0
+        percent_tokens_used = (total_used / self.tpm_limit) * 100 if self.tpm_limit > 0 else 0
+        
+        request_count = len(self.tokens_used)
+        percent_requests_used = (request_count / self.rpm_limit) * 100 if self.rpm_limit > 0 else 0
+        
+        # Use the maximum of the two percentages to represent overall utilization
+        overall_percent = max(percent_tokens_used, percent_requests_used)
         
         return {
             "tokens_used_this_minute": total_used,
             "tokens_remaining": remaining,
-            "percent_used": percent_used,
+            "percent_used": overall_percent,
             "limit": self.tpm_limit,
-            "records_in_window": len(self.tokens_used),
+            "records_in_window": request_count,
+            "rpm_limit": self.rpm_limit,
+            "rpm_percent": percent_requests_used,
         }
     
     def wait_if_needed(self) -> float:
         """
-        If approaching rate limit, wait until oldest token(s) age out of window.
+        If approaching rate limit, wait until oldest token(s)/request(s) age out of window.
         Returns the number of seconds waited (0 if no wait).
         """
         now = time.time()
@@ -93,7 +108,7 @@ class TokenBucket:
         if stats["percent_used"] < 70:
             return 0.0
         
-        # If at/over limit, wait for oldest token to age out
+        # If at/over limit, wait for oldest token/request to age out
         if not self.tokens_used:
             return 0.0
         

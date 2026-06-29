@@ -8,6 +8,7 @@ if fastembed is not installed.  Embeddings are cached in the
 
 from __future__ import annotations
 
+import os
 import hashlib
 from typing import Any
 
@@ -36,14 +37,50 @@ def _get_embedding_model() -> Any:
         _EMBED_DIM = 384
         print("[Embeddings] Using fastembed (BAAI/bge-small-en-v1.5)")
         return _EMBED_MODEL
-    except ImportError:
-        pass
+    except Exception as e:
+        print(f"[Embeddings] fastembed not available: {e}")
 
-    # Fallback: simple bag-of-words hashing (no external deps)
-    _EMBED_MODEL = "bow_fallback"
-    _EMBED_DIM = 256
-    print("[Embeddings] fastembed not available — using BoW fallback")
-    return _EMBED_MODEL
+    try:
+        api_key = (
+            os.environ.get("OPENAI_API_KEY") or
+            os.environ.get("NVIDIA_API_KEY_TIER1") or
+            os.environ.get("NVIDIA_API_KEY_CLASSIFIER") or
+            os.environ.get("NVIDIA_API_KEY_PLANNER")
+        )
+        if api_key:
+            from langchain_openai import OpenAIEmbeddings
+            if os.environ.get("OPENAI_API_KEY"):
+                model_name = "text-embedding-3-small"
+                base_url = None
+                dim = 1536
+            else:
+                model_name = "nvidia/embeddings-nv-embed-qa-4"
+                base_url = os.environ.get("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
+                dim = 1024
+
+            class LangChainEmbeddingWrapper:
+                def __init__(self, embeddings: OpenAIEmbeddings):
+                    self.embeddings = embeddings
+                def embed(self, texts: list[str]):
+                    return self.embeddings.embed_documents(texts)
+
+            embedder = OpenAIEmbeddings(
+                model=model_name,
+                api_key=api_key,
+                base_url=base_url,
+            )
+            _EMBED_MODEL = LangChainEmbeddingWrapper(embedder)
+            _EMBED_DIM = dim
+            print(f"[Embeddings] Using langchain_openai fallback ({model_name})")
+            return _EMBED_MODEL
+    except Exception as exc:
+        print(f"[Embeddings] Failed to initialize langchain_openai fallback: {exc}")
+
+    raise RuntimeError(
+        "No real embedding backend is available. BAAI/bge-small-en-v1.5 (via fastembed) "
+        "and OpenAI/Nvidia (via langchain_openai) both failed or lack API keys. "
+        "The semantic retrieval pipeline cannot degrade to keyword search."
+    )
 
 
 def _bow_embed(text: str, dim: int = 256) -> np.ndarray:

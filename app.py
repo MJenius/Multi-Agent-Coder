@@ -169,7 +169,8 @@ if st.button("🚀 Start Resolution Process"):
         stop_container = st.empty()
         stop_btn = stop_container.button("🛑 STOP Execution", key="stop_btn", on_click=_request_stop)
         thought_container = st.empty()
-        thought_log = ""
+        st.session_state.thought_container = thought_container
+        st.session_state.thought_log = ""
         
         final_state = initial_state
         
@@ -180,15 +181,6 @@ if st.button("🚀 Start Resolution Process"):
                 break
             
             for node_name, state_update in event.items():
-                new_logs = state_update.get("history", [])
-                if new_logs:
-                    for entry in new_logs:
-                        thought_log += f"**[{node_name}]**: {entry}\n\n"
-                        thought_container.markdown(
-                            f'<div class="thought-trace">{thought_log}</div>', 
-                            unsafe_allow_html=True
-                        )
-                
                 final_state.update(state_update)
 
         # Finalize trace info
@@ -209,7 +201,7 @@ if st.button("🚀 Start Resolution Process"):
                 final_state["resolution_note"] = "No test suite was found"
             
         st.session_state.final_state = final_state
-        st.session_state.thought_log = thought_log
+        st.session_state.thought_log = st.session_state.get("thought_log", "")
         st.session_state.trace_summary = trace_summary
 
 # Display Results from Session State

@@ -59,6 +59,7 @@ def main() -> None:
         "ast_error_detail": "",
         "environment_config": {},
         "contribution_guidelines": "",
+        "verification_type": "runtime tests",
         "history": [],
     }
 

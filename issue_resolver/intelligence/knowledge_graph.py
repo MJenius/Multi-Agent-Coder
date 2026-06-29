@@ -409,8 +409,10 @@ class RepoKnowledgeGraph:
             },
         }
 
-    def to_text_summary(self, max_lines: int = 200) -> str:
+    def to_text_summary(self, max_lines: int = 200, limit: int | None = None) -> str:
         """Return a human-readable summary for LLM prompts."""
+        if limit is not None:
+            max_lines = limit
         lines: list[str] = [
             f"Repository Knowledge Graph: {len(self.modules)} modules, "
             f"{len(self.classes)} classes, {len(self.functions)} functions",

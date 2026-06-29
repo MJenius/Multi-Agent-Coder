@@ -50,7 +50,7 @@ def repo_analyst_node(state: AgentState) -> dict:
 
     messages = [
         SystemMessage(content=prompt),
-        HumanMessage(content=f"Static Analysis Profile:\n{static_summary}\n\nKnowledge Graph Summary:\n{graph.to_text_summary(limit=100) if hasattr(graph, 'to_text_summary') else ''}"),
+        HumanMessage(content=f"Static Analysis Profile:\n{static_summary}\n\nKnowledge Graph Summary:\n{graph.to_text_summary(max_lines=100) if hasattr(graph, 'to_text_summary') else ''}"),
     ]
 
     response, model_name = invoke_with_role_fallback(

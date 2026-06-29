@@ -69,6 +69,22 @@ class HybridRetriever:
         if not all_paths:
             return []
 
+        # Resolve symbols in query to anchor files in Repository Graph
+        keywords = self._extract_identifiers(query)
+        symbol_files = []
+        for kw in keywords:
+            cls = self.graph.get_class(kw)
+            if cls:
+                symbol_files.append(cls.file_path)
+            fn = self.graph.get_function(kw)
+            if fn:
+                symbol_files.append(fn.file_path)
+
+        anchors = list(hint_files) if hint_files else []
+        for sf in symbol_files:
+            if sf not in anchors:
+                anchors.append(sf)
+
         # Compute per-signal scores for every file
         scores: dict[str, dict[str, float]] = {p: {} for p in all_paths}
 
@@ -80,26 +96,25 @@ class HybridRetriever:
             raw = semantic_map.get(path, 0.0)
             scores[path]["semantic"] = raw / max_semantic if max_semantic > 0 else 0.0
 
-        # Signal 2: AST relationship (proximity to hint files)
-        if hint_files:
+        # Signal 2: AST relationship (proximity to anchors)
+        if anchors:
             for path in all_paths:
-                ast_score = self._compute_ast_score(path, hint_files)
+                ast_score = self._compute_ast_score(path, anchors)
                 scores[path]["ast_relationship"] = ast_score
         else:
             for path in all_paths:
                 scores[path]["ast_relationship"] = 0.0
 
         # Signal 3: Dependency distance
-        if hint_files:
+        if anchors:
             for path in all_paths:
-                dep_score = self._compute_dependency_score(path, hint_files)
+                dep_score = self._compute_dependency_score(path, anchors)
                 scores[path]["dependency_distance"] = dep_score
         else:
             for path in all_paths:
                 scores[path]["dependency_distance"] = 0.0
 
         # Signal 4: Symbol overlap
-        keywords = self._extract_identifiers(query)
         for path in all_paths:
             symbol_score = self._compute_symbol_overlap(path, keywords)
             scores[path]["symbol_overlap"] = symbol_score
@@ -138,6 +153,8 @@ class HybridRetriever:
 
     def _compute_ast_score(self, path: str, hint_files: list[str]) -> float:
         """Score based on graph distance to hint files."""
+        if path in hint_files:
+            return 1.0
         module = self.graph.get_module(path)
         if not module:
             return 0.0
@@ -159,6 +176,8 @@ class HybridRetriever:
 
     def _compute_dependency_score(self, path: str, hint_files: list[str]) -> float:
         """Score based on import distance to hint files."""
+        if path in hint_files:
+            return 1.0
         for hint in hint_files:
             # Direct import
             deps = self.graph.get_dependencies(hint)

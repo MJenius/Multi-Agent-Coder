@@ -10,6 +10,7 @@ from issue_resolver.nodes.failure_handler import failure_handler_node
 
 # New v2 Nodes
 from issue_resolver.nodes.issue_classifier import issue_classifier_node
+from issue_resolver.nodes.verification_type_classifier import verification_type_classifier_node
 from issue_resolver.nodes.repo_intelligence_node import repo_intelligence_node
 from issue_resolver.nodes.repo_analyst import repo_analyst_node
 from issue_resolver.nodes.context_curator import context_curator_node
@@ -31,6 +32,7 @@ __all__ = [
     "reviewer_node",
     "failure_handler_node",
     "issue_classifier_node",
+    "verification_type_classifier_node",
     "repo_intelligence_node",
     "repo_analyst_node",
     "context_curator_node",

@@ -243,7 +243,8 @@ def reviewer_node(state: AgentState) -> dict:
 
     # 2. Run sandbox verification pipeline
     from issue_resolver.utils.verifier import VerificationPipeline
-    pipeline = VerificationPipeline(repo_path)
+    verification_type = state.get("verification_type", "runtime tests")
+    pipeline = VerificationPipeline(repo_path, verification_type=verification_type)
     
     # Run the verification steps on changed files
     print("[Reviewer] Applying and validating patch using the verification pipeline...")

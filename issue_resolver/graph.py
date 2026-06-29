@@ -3,6 +3,8 @@ import operator
 from typing import TypedDict, Annotated
 from langgraph.graph import StateGraph, END
 
+from issue_resolver.utils.logger import append_to_history
+
 from issue_resolver.state import AgentState
 from issue_resolver.nodes import (
     setup_node,
@@ -14,6 +16,7 @@ from issue_resolver.nodes import (
     reviewer_node,
     failure_handler_node,
     issue_classifier_node,
+    verification_type_classifier_node,
     repo_intelligence_node,
     repo_analyst_node,
     context_curator_node,
@@ -33,6 +36,7 @@ class WorkspaceDiscoveryState(TypedDict):
     issue: str
     repo_path: str
     issue_category: str
+    verification_type: str
     repo_intelligence: dict
     repo_profile: dict
     file_context: list[str]
@@ -79,6 +83,7 @@ class VerificationState(TypedDict):
     test_file_path: str
     test_framework_used: str
     test_runs_initially: bool
+    verification_type: str
     errors: str
     iterations: int
     critique_results: list[dict]
@@ -104,6 +109,7 @@ def _route_patch_reviewer(state: PatchEngineeringState) -> str:
 wd_builder = StateGraph(WorkspaceDiscoveryState)
 wd_builder.add_node("setup", setup_node)
 wd_builder.add_node("issue_classifier", issue_classifier_node)
+wd_builder.add_node("verification_type_classifier", verification_type_classifier_node)
 wd_builder.add_node("repo_intelligence_node", repo_intelligence_node)
 wd_builder.add_node("repo_analyst", repo_analyst_node)
 wd_builder.add_node("researcher", researcher_node)
@@ -112,7 +118,8 @@ wd_builder.add_node("planner", planner_node)
 
 wd_builder.set_entry_point("setup")
 wd_builder.add_edge("setup", "issue_classifier")
-wd_builder.add_edge("issue_classifier", "repo_intelligence_node")
+wd_builder.add_edge("issue_classifier", "verification_type_classifier")
+wd_builder.add_edge("verification_type_classifier", "repo_intelligence_node")
 wd_builder.add_edge("repo_intelligence_node", "repo_analyst")
 wd_builder.add_edge("repo_analyst", "researcher")
 wd_builder.add_edge("researcher", "context_curator")
@@ -166,6 +173,7 @@ def workspace_discovery_node(state: AgentState) -> dict:
         "issue": state.get("issue"),
         "repo_path": state.get("repo_path"),
         "issue_category": state.get("issue_category", "Bug"),
+        "verification_type": state.get("verification_type", "runtime tests"),
         "repo_intelligence": state.get("repo_intelligence", {}),
         "repo_profile": state.get("repo_profile", {}),
         "file_context": list(state.get("file_context", [])),
@@ -180,9 +188,11 @@ def workspace_discovery_node(state: AgentState) -> dict:
         "current_view_line": state.get("current_view_line", 1),
     }
     res = wd_graph.invoke(sub_state)
+    completion_entry = append_to_history("WorkspaceDiscovery", "Complete", "Discovery and intelligence gathering complete. Plan generated.")[0]
     return {
         "plan": res.get("plan"),
         "issue_category": res.get("issue_category"),
+        "verification_type": res.get("verification_type"),
         "repo_intelligence": res.get("repo_intelligence"),
         "repo_profile": res.get("repo_profile"),
         "file_context": res.get("file_context"),
@@ -192,7 +202,7 @@ def workspace_discovery_node(state: AgentState) -> dict:
         "iterations": res.get("iterations"),
         "current_view_file": res.get("current_view_file"),
         "current_view_line": res.get("current_view_line"),
-        "history": [{"node": "WorkspaceDiscovery", "action": "Complete", "content": "Discovery and intelligence gathering complete. Plan generated."}],
+        "history": res.get("history", []) + [completion_entry],
     }
 
 def verification_node(state: AgentState) -> dict:
@@ -207,6 +217,7 @@ def verification_node(state: AgentState) -> dict:
         "test_file_path": state.get("test_file_path", ""),
         "test_framework_used": state.get("test_framework_used", "pytest"),
         "test_runs_initially": state.get("test_runs_initially"),
+        "verification_type": state.get("verification_type", "runtime tests"),
         "errors": state.get("errors", ""),
         "iterations": state.get("iterations", 0),
         "critique_results": state.get("critique_results", []),
@@ -214,6 +225,7 @@ def verification_node(state: AgentState) -> dict:
         "environment_config": state.get("environment_config", {}),
     }
     res = v_graph.invoke(sub_state)
+    completion_entry = append_to_history("Verification", "Complete", f"Verification complete. Runs initially: {res.get('test_runs_initially')}.")[0]
     return {
         "test_code": res.get("test_code"),
         "test_file_path": res.get("test_file_path"),
@@ -222,7 +234,7 @@ def verification_node(state: AgentState) -> dict:
         "critique_results": res.get("critique_results"),
         "errors": res.get("errors"),
         "iterations": res.get("iterations"),
-        "history": [{"node": "Verification", "action": "Complete", "content": f"Verification complete. Runs initially: {res.get('test_runs_initially')}."}],
+        "history": res.get("history", []) + [completion_entry],
     }
 
 def patch_engineering_node(state: AgentState) -> dict:
@@ -253,6 +265,7 @@ def patch_engineering_node(state: AgentState) -> dict:
         "environment_config": state.get("environment_config", {}),
     }
     res = pe_graph.invoke(sub_state)
+    completion_entry = append_to_history("PatchEngineering", "Complete", f"Patch engineering complete. Status: {res.get('validation_status')}.")[0]
     return {
         "proposed_fix": res.get("proposed_fix"),
         "validation_status": res.get("validation_status"),
@@ -262,7 +275,7 @@ def patch_engineering_node(state: AgentState) -> dict:
         "coder_retry_budget": res.get("coder_retry_budget"),
         "iterations": res.get("iterations"),
         "is_resolved": res.get("validation_status") == "passed",
-        "history": [{"node": "PatchEngineering", "action": "Complete", "content": f"Patch engineering complete. Status: {res.get('validation_status')}."}],
+        "history": res.get("history", []) + [completion_entry],
     }
 
 def _route_parent(state: AgentState) -> str:

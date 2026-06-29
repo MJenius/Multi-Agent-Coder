@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from typing import Any
 
 from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
 
@@ -11,6 +12,7 @@ from issue_resolver.utils.logger import append_to_history
 from issue_resolver.config import RESEARCHER_MODEL_CANDIDATES
 from issue_resolver.llm_utils import invoke_with_role_fallback
 from issue_resolver.utils.ripgrep_search import smart_search, generate_search_variants
+import issue_resolver.runtime_context as runtime_context
 from issue_resolver.tools import (
     REPO_TOOLS,
     list_files,
@@ -85,6 +87,50 @@ def _extract_hints_from_issue(issue_text: str) -> list[str]:
             final_hints.append(path)
 
     return final_hints
+
+
+def _query_graph_for_symbols(issue_text: str, graph: Any) -> list[str]:
+    """Identify classes, functions, methods, parameters or symbols in issue_text
+    and retrieve their source files directly from the Repository Graph.
+    """
+    if not graph:
+        return []
+
+    # Extract all candidate tokens from issue text
+    tokens = re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', issue_text)
+    seen_tokens = set()
+    unique_tokens = []
+    for t in tokens:
+        if len(t) >= 3 and t not in seen_tokens:
+            seen_tokens.add(t)
+            unique_tokens.append(t)
+
+    candidate_files: dict[str, int] = {}
+
+    # Match symbols defined in the graph
+    for token in unique_tokens:
+        # Match classes
+        cls = graph.get_class(token)
+        if cls:
+            candidate_files[cls.file_path] = candidate_files.get(cls.file_path, 0) + 15
+
+        # Match functions/methods
+        fn = graph.get_function(token)
+        if fn:
+            candidate_files[fn.file_path] = candidate_files.get(fn.file_path, 0) + 12
+            for param in fn.parameters:
+                if len(param) >= 4 and param.lower() != "self" and param in seen_tokens:
+                    candidate_files[fn.file_path] = candidate_files.get(fn.file_path, 0) + 5
+
+    # Match parameters independently
+    for fn in graph.functions.values():
+        for param in fn.parameters:
+            if len(param) >= 5 and param in seen_tokens:
+                candidate_files[fn.file_path] = candidate_files.get(fn.file_path, 0) + 3
+
+    # Sort files by match score
+    sorted_files = sorted(candidate_files.items(), key=lambda x: -x[1])
+    return [path for path, score in sorted_files if score >= 10]
 
 
 def _detect_language(repo_path: str) -> str:
@@ -390,45 +436,66 @@ def researcher_node(state: AgentState) -> dict:
         print(f"[Researcher] Found {len(hint_files)} direct hint(s): {hint_files}")
         history_additions.extend(append_to_history("Researcher", "Hint Extraction", f"Hints: {hint_files}"))
 
-        for idx, hint_file in enumerate(hint_files[:_MAX_FILES_READ], 1):
+    # 1. Query the Repository Graph before doing keyword search
+    graph = runtime_context.get_knowledge_graph()
+    graph_files = []
+    if graph:
+        graph_files = _query_graph_for_symbols(issue_text, graph)
+        if graph_files:
+            print(f"[Researcher] Found {len(graph_files)} files matching symbols in Repository Graph: {graph_files}")
+            history_additions.extend(
+                append_to_history("Researcher", "Graph Symbol Lookup", f"Matched files from Repository Graph: {graph_files}")
+            )
+
+    # Merge hint files and graph-resolved symbol files
+    all_target_files = []
+    for f in hint_files:
+        if f not in all_target_files:
+            all_target_files.append(f)
+    for f in graph_files:
+        if f not in all_target_files:
+            all_target_files.append(f)
+
+    if all_target_files:
+        for idx, target_file in enumerate(all_target_files[:_MAX_FILES_READ], 1):
             if files_read >= _MAX_FILES_READ:
                 break
 
-            normalized_hint = hint_file.lstrip('./')
+            normalized_target = target_file.lstrip('./').replace('\\', '/')
             repo_name = Path(repo_path).name
-            if normalized_hint.startswith(repo_name + '/'):
-                normalized_hint = normalized_hint[len(repo_name) + 1:]
+            if normalized_target.startswith(repo_name + '/'):
+                normalized_target = normalized_target[len(repo_name) + 1:]
 
-            safe_path_resolved = (Path(repo_path) / normalized_hint).resolve()
+            safe_path_resolved = (Path(repo_path) / normalized_target).resolve()
 
             if not safe_path_resolved.is_file():
-                print(f"[Researcher] Skipping '{hint_file}' (not a real file)")
+                print(f"[Researcher] Skipping '{target_file}' (not a real file)")
                 history_additions.extend(
-                    append_to_history("Researcher", "Hint Skip", f"'{hint_file}' not found in repo")
+                    append_to_history("Researcher", "Target Skip", f"'{target_file}' not found in repo")
                 )
                 continue
 
             try:
                 result = read_file.invoke({"file_path": str(safe_path_resolved)})
                 if result.startswith("Error"):
-                    print(f"[Researcher] Failed to read {hint_file}: {result[:100]}")
+                    print(f"[Researcher] Failed to read {target_file}: {result[:100]}")
                     history_additions.extend(
-                        append_to_history("Researcher", "Hint Read", f"Failed: {hint_file} ({result[:80]})")
+                        append_to_history("Researcher", "Target Read", f"Failed: {target_file} ({result[:80]})")
                     )
                 else:
                     lines_in_file = result.count("\n")
-                    print(f"[Researcher] Read {lines_in_file} lines from {hint_file}")
-                    snippet = f"# --- [HINTED] file: {hint_file} ---\n{result}"
+                    print(f"[Researcher] Read {lines_in_file} lines from {target_file}")
+                    snippet = f"# --- file: {normalized_target} ---\n{result}"
                     snippets.append(snippet)
                     files_read += 1
                     total_lines += lines_in_file + 1
                     history_additions.extend(
-                        append_to_history("Researcher", "Hint Read", f"{hint_file} ({lines_in_file} lines)")
+                        append_to_history("Researcher", "Target Read", f"{normalized_target} ({lines_in_file} lines)")
                     )
             except Exception as e:
-                print(f"[Researcher] Exception reading {hint_file}: {e}")
+                print(f"[Researcher] Exception reading {target_file}: {e}")
                 history_additions.extend(
-                    append_to_history("Researcher", "Hint Read", f"Exception: {str(e)[:80]}")
+                    append_to_history("Researcher", "Target Read", f"Exception: {str(e)[:80]}")
                 )
 
     if snippets and files_read >= 1:

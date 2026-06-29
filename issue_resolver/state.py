@@ -42,6 +42,7 @@ class AgentState(TypedDict):
 
     # v2 State Fields
     issue_category: str
+    verification_type: str
     repo_intelligence: dict
     repo_profile: dict
     context_confidence: dict

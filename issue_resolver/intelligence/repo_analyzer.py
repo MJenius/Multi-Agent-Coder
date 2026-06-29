@@ -165,46 +165,52 @@ class RepoAnalyzer:
 
     def _detect_framework(self) -> None:
         deps = {d.package.lower() for d in self.graph.dependencies}
-        file_names = {Path(m.path).name for m in self.graph.modules.values()}
+        metadata_deps = self._extract_dependencies_from_metadata()
+        all_deps = deps | metadata_deps
+
+        # Django special detection: check for manage.py or settings.py
+        has_django_files = (self.root / "manage.py").is_file() or any(
+            "settings.py" in Path(m.path).name for m in self.graph.modules.values()
+        )
 
         # Python frameworks
-        if "django" in deps:
+        if "django" in all_deps or has_django_files:
             self.profile.framework = "Django"
             self.profile.architecture_pattern = "MVC (MTV)"
-        elif "fastapi" in deps:
+        elif "fastapi" in all_deps:
             self.profile.framework = "FastAPI"
             self.profile.architecture_pattern = "REST API"
-        elif "flask" in deps:
+        elif "flask" in all_deps:
             self.profile.framework = "Flask"
             self.profile.architecture_pattern = "Microframework"
-        elif "streamlit" in deps:
+        elif "streamlit" in all_deps:
             self.profile.framework = "Streamlit"
             self.profile.architecture_pattern = "Dashboard"
-        elif "langgraph" in deps or "langchain" in deps:
+        elif "langgraph" in all_deps or "langchain" in all_deps:
             self.profile.framework = "LangGraph/LangChain"
             self.profile.architecture_pattern = "Agent Pipeline"
 
         # JS frameworks
-        elif "next" in deps:
+        elif "next" in all_deps:
             self.profile.framework = "Next.js"
             self.profile.architecture_pattern = "SSR Framework"
-        elif "react" in deps:
+        elif "react" in all_deps:
             self.profile.framework = "React"
             self.profile.architecture_pattern = "SPA"
-        elif "express" in deps:
+        elif "express" in all_deps:
             self.profile.framework = "Express.js"
             self.profile.architecture_pattern = "REST API"
-        elif "vue" in deps:
+        elif "vue" in all_deps:
             self.profile.framework = "Vue.js"
             self.profile.architecture_pattern = "SPA"
 
         # .NET
-        elif any("aspnetcore" in d for d in deps) or "Microsoft.AspNetCore.App" in deps:
+        elif any("aspnetcore" in d for d in all_deps) or "microsoft.aspnetcore.app" in all_deps:
             self.profile.framework = "ASP.NET Core"
             self.profile.architecture_pattern = "MVC"
 
         # Go
-        elif "gin-gonic/gin" in deps:
+        elif "gin-gonic/gin" in all_deps or "gin" in all_deps:
             self.profile.framework = "Gin"
             self.profile.architecture_pattern = "REST API"
 
@@ -217,6 +223,108 @@ class RepoAnalyzer:
                 self.profile.architecture_pattern = "Layered"
             else:
                 self.profile.architecture_pattern = "Flat/Script"
+
+    def _extract_dependencies_from_metadata(self) -> set[str]:
+        deps: set[str] = set()
+
+        # 1. Parse pyproject.toml
+        pyproject_path = self.root / "pyproject.toml"
+        if pyproject_path.is_file():
+            try:
+                import tomllib
+                content = pyproject_path.read_bytes()
+                data = tomllib.loads(content.decode("utf-8", errors="replace"))
+
+                project = data.get("project", {})
+                for dep in project.get("dependencies", []):
+                    m = re.match(r"^([a-zA-Z0-9_\-]+)", dep.strip())
+                    if m:
+                        deps.add(m.group(1).lower())
+                for option, opt_deps in project.get("optional-dependencies", {}).items():
+                    for dep in opt_deps:
+                        m = re.match(r"^([a-zA-Z0-9_\-]+)", dep.strip())
+                        if m:
+                            deps.add(m.group(1).lower())
+
+                poetry = data.get("tool", {}).get("poetry", {})
+                for dep in poetry.get("dependencies", {}):
+                    deps.add(dep.lower())
+                for group, group_data in poetry.get("group", {}).items():
+                    for dep in group_data.get("dependencies", {}):
+                        deps.add(dep.lower())
+
+                if "pytest" in data.get("tool", {}):
+                    deps.add("pytest")
+                if "ruff" in data.get("tool", {}):
+                    deps.add("ruff")
+                if "mypy" in data.get("tool", {}):
+                    deps.add("mypy")
+            except Exception:
+                try:
+                    content = pyproject_path.read_text(encoding="utf-8", errors="replace")
+                    for dep in re.findall(r'"([a-zA-Z0-9_\-]+)(?:[>=<~! ]|$)', content):
+                        deps.add(dep.lower())
+                except Exception:
+                    pass
+
+        # 2. Parse setup.py
+        setup_py = self.root / "setup.py"
+        if setup_py.is_file():
+            try:
+                content = setup_py.read_text(encoding="utf-8", errors="replace")
+                matches = re.findall(r"['\"]([a-zA-Z0-9_\-]+)(?:[>=<~! ]|['\"])", content)
+                for m in matches:
+                    deps.add(m.lower())
+            except Exception:
+                pass
+
+        # 3. Parse requirements.txt
+        for req_name in ["requirements.txt", "dev-requirements.txt", "requirements-dev.txt"]:
+            req_file = self.root / req_name
+            if req_file.is_file():
+                try:
+                    content = req_file.read_text(encoding="utf-8", errors="replace")
+                    for line in content.splitlines():
+                        line = line.strip()
+                        if line and not line.startswith("#"):
+                            m = re.match(r"^([a-zA-Z0-9_\-]+)", line)
+                            if m:
+                                deps.add(m.group(1).lower())
+                except Exception:
+                    pass
+
+        # 4. Parse package.json
+        pkg_json = self.root / "package.json"
+        if pkg_json.is_file():
+            try:
+                data = json.loads(pkg_json.read_text(encoding="utf-8", errors="replace"))
+                for dep_type in ["dependencies", "devDependencies", "peerDependencies"]:
+                    for dep in data.get(dep_type, {}):
+                        deps.add(dep.lower())
+            except Exception:
+                pass
+
+        # 5. Extract from CI configs
+        workflows_dir = self.root / ".github" / "workflows"
+        if workflows_dir.is_dir():
+            try:
+                for f in workflows_dir.iterdir():
+                    if f.is_file() and (f.suffix in [".yml", ".yaml"]):
+                        content = f.read_text(encoding="utf-8", errors="replace")
+                        if "pytest" in content:
+                            deps.add("pytest")
+                        if "mypy" in content:
+                            deps.add("mypy")
+                        if "ruff" in content:
+                            deps.add("ruff")
+                        if "tox" in content:
+                            deps.add("tox")
+                        if "django" in content.lower():
+                            deps.add("django")
+            except Exception:
+                pass
+
+        return deps
 
     def _detect_tooling(self) -> None:
         configs = {m.path for m in self.graph.modules.values() if m.is_config}
@@ -262,19 +370,23 @@ class RepoAnalyzer:
 
     def _detect_testing(self) -> None:
         deps = {d.package.lower() for d in self.graph.dependencies}
+        metadata_deps = self._extract_dependencies_from_metadata()
+        all_deps = deps | metadata_deps
         test_modules = self.graph.get_test_modules()
 
+        has_pytest_ini = (self.root / "pytest.ini").is_file() or (self.root / "tox.ini").is_file()
+
         # Detect framework
-        if "pytest" in deps or any("conftest.py" in m.path for m in test_modules):
+        if "pytest" in all_deps or has_pytest_ini or any("conftest.py" in m.path for m in test_modules):
             self.profile.test_framework = "pytest"
             self.profile.test_command = "pytest"
-        elif any("unittest" in m.imports for m in test_modules):
+        elif "unittest" in all_deps or any("unittest" in m.imports for m in test_modules):
             self.profile.test_framework = "unittest"
             self.profile.test_command = "python -m unittest discover"
-        elif "jest" in deps:
+        elif "jest" in all_deps:
             self.profile.test_framework = "jest"
             self.profile.test_command = "npx jest"
-        elif "vitest" in deps:
+        elif "vitest" in all_deps:
             self.profile.test_framework = "vitest"
             self.profile.test_command = "npx vitest"
 
@@ -284,6 +396,12 @@ class RepoAnalyzer:
             parts = Path(mod.path).parts
             if len(parts) > 1:
                 test_dirs.add(parts[0])
+
+        if not test_dirs:
+            for dirname in ["tests", "test", "spec", "testing"]:
+                if (self.root / dirname).is_dir():
+                    test_dirs.add(dirname)
+
         if test_dirs:
             self.profile.test_directory = sorted(test_dirs)[0]
 
@@ -298,6 +416,15 @@ class RepoAnalyzer:
                 self.profile.test_convention = "*.test.*"
             elif any(".spec." in n for n in names):
                 self.profile.test_convention = "*.spec.*"
+        else:
+            self.profile.test_convention = "test_*.py"
+
+        # Check for fixtures and mocks
+        for mod in test_modules:
+            if "fixture" in str(mod.imports).lower() or "conftest" in mod.path:
+                self.profile.uses_fixtures = True
+            if "mock" in str(mod.imports).lower() or "unittest.mock" in str(mod.imports):
+                self.profile.uses_mocks = True
 
         # Check for fixtures and mocks
         for mod in test_modules:

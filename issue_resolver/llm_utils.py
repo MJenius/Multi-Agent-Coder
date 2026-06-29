@@ -236,6 +236,7 @@ def invoke_with_role_fallback(
                 base_url=cfg.base_url or NVIDIA_BASE_URL,
                 temperature=temperature if temperature != 0.0 else cfg.temperature,
                 max_tokens=max_tokens or cfg.max_tokens,
+                timeout=60.0,  # 60s timeout to prevent hanging on gateway timeout
                 **extra_args
             )
             llm_to_call = llm.bind_tools(tools) if tools else llm
@@ -268,29 +269,36 @@ def invoke_with_role_fallback(
             return response, cfg.model
         except Exception as exc:
             last_exc = exc
+            print(f"[{role}] [WARNING] Model '{cfg.model}' failed: {exc}")
+            
+            try:
+                from issue_resolver.core.model_router import get_model_router
+                router = get_model_router()
+                if router:
+                    router.mark_failed(cfg.model)
+            except Exception:
+                pass
+                
+            if _SELECTED_MODEL_BY_ROLE.get(role) == cfg.model:
+                del _SELECTED_MODEL_BY_ROLE[role]
 
             if _is_model_decommissioned(exc):
                 print(f"[{role}] [DECOMMISSIONED] Model '{cfg.model}' permanently unavailable")
                 _DECOMMISSIONED_MODELS.add(cfg.model)
-                router.mark_failed(cfg.model)
-                if _SELECTED_MODEL_BY_ROLE.get(role) == cfg.model:
-                    del _SELECTED_MODEL_BY_ROLE[role]
-                continue
-
-            if _is_quota_exceeded(exc):
+            elif _is_quota_exceeded(exc):
                 print(f"[{role}] [QUOTA_EXCEEDED] Model '{cfg.model}' hit daily limit")
                 _QUOTA_EXCEEDED_MODELS.add(cfg.model)
-                router.mark_quota_exceeded(cfg.model)
-                if _SELECTED_MODEL_BY_ROLE.get(role) == cfg.model:
-                    del _SELECTED_MODEL_BY_ROLE[role]
-                continue
-
-            if _is_model_unavailable(exc):
-                print(f"[{role}] [FALLBACK] model '{cfg.model}' temporarily unavailable: {exc}")
-                router.mark_failed(cfg.model)
-                continue
-
-            raise
+                try:
+                    from issue_resolver.core.model_router import get_model_router
+                    router = get_model_router()
+                    if router:
+                        router.mark_quota_exceeded(cfg.model)
+                except Exception:
+                    pass
+            else:
+                print(f"[{role}] [FALLBACK] model '{cfg.model}' encountered error or timeout: {exc}")
+            
+            continue
 
     if last_exc is None:
         raise RuntimeError(f"{role}: no model candidates configured")

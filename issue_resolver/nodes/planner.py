@@ -53,6 +53,7 @@ Critical Rules:
 4. "implementation_steps" must list incremental modifications with explicit dependencies.
 5. If the issue is about parsing, serialization, or type formatting, prioritize modifications to general utilities/encoders over specific wrappers or endpoints.
 6. Keep the scope of edits minimal and precise. Avoid massive repository-wide code edits.
+7. Drive your decisions (e.g. files to edit, affected modules, execution order, dependency mapping) primarily using the Repository Intelligence section. The Repository Graph structure and relationship links are the authoritative source of repository structure. Align your step dependencies with the import/dependency relationships shown in the graph.
 """
 
 get_prompt_registry().register("planner", "2.0", _SYSTEM_PROMPT)
@@ -82,17 +83,39 @@ def planner_node(state: AgentState) -> dict:
 
     # Retrieve profile and intelligence summaries
     repo_profile = state.get("repo_profile", {})
-    repo_profile_summary = ""
+    graph = runtime_context.get_knowledge_graph()
+
+    repo_intel_parts = []
+
     if repo_profile:
-        repo_profile_summary = f"Language: {repo_profile.get('primary_language')}\nFramework: {repo_profile.get('framework')}\nTesting: {repo_profile.get('test_framework')}"
+        repo_intel_parts.append(
+            f"### Naming/Architecture Conventions:\n"
+            f"- Language: {repo_profile.get('primary_language')}\n"
+            f"- Framework: {repo_profile.get('framework')}\n"
+            f"- Architecture Pattern: {repo_profile.get('architecture_pattern')}\n"
+            f"- Package Manager: {repo_profile.get('package_manager')}\n"
+            f"- Linter: {repo_profile.get('linter')}\n"
+            f"- Formatter: {repo_profile.get('formatter')}\n"
+            f"- Testing: {repo_profile.get('test_framework')} (Directory: {repo_profile.get('test_directory')})"
+        )
+
+    if graph:
+        # Get a nice textual summary of the repository graph (limit to 150 lines)
+        graph_summary = graph.to_text_summary(limit=150)
+        repo_intel_parts.append(f"### Repository Graph Structure:\n{graph_summary}")
+
+    context_confidence = state.get("context_confidence", {})
+    if context_confidence:
+        confidence_lines = [f"- `{path}`: {conf} confidence" for path, conf in context_confidence.items()]
+        repo_intel_parts.append("### Context File Confidence Scores:\n" + "\n".join(confidence_lines))
 
     # Format planning prompt
     context_parts = []
-    if repo_profile_summary:
-        context_parts.append(f"## Repository Profile\n{repo_profile_summary}")
+    if repo_intel_parts:
+        context_parts.append("## Repository Intelligence\n" + "\n\n".join(repo_intel_parts))
 
     if file_context:
-        context_parts.append(f"## Code Context\n" + "\n\n".join(file_context[:4]))
+        context_parts.append("## Code Context\n" + "\n\n".join(file_context[:6]))
 
     context_str = "\n\n".join(context_parts) if context_parts else "(no context available)"
 

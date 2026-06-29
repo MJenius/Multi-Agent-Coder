@@ -24,6 +24,19 @@ from issue_resolver.tools.sandbox_tools import apply_diff_in_sandbox, run_tests_
 
 def test_validator_node(state: AgentState) -> dict:
     """Run the generated test to verify it fails and capture the output."""
+    verification_type = state.get("verification_type", "runtime tests")
+    if verification_type != "runtime tests":
+        print(f"[TestValidator] [SKIP] Skipping pytest failure reproduction for verification type: {verification_type}")
+        return {
+            "test_runs_initially": True,
+            "errors": "",
+            "history": append_to_history(
+                "TestValidator",
+                "Skipped",
+                f"Skipped failure reproduction check because verification type is {verification_type}."
+            ),
+        }
+
     print("[TestValidator] Running generated test to reproduce issue...")
 
     test_code = state.get("test_code", "")
@@ -55,7 +68,7 @@ def test_validator_node(state: AgentState) -> dict:
         
         with open(full_test_path, "w", encoding="utf-8") as f:
             f.write(test_code)
-        print(f"[TestValidator] ✅ Test file written to {full_test_path}")
+        print(f"[TestValidator] Test file written to {full_test_path}")
         
     except Exception as exc:
         error_msg = f"Failed to write test file: {exc}"
@@ -94,7 +107,7 @@ def test_validator_node(state: AgentState) -> dict:
         
         # Test ran successfully (locally)
         if "FAILED" in test_output or "ERROR" in test_output or "failed" in test_output.lower():
-            print("[TestValidator] ✅ Test fails as expected (issue reproduced)")
+            print("[TestValidator] Test fails as expected (issue reproduced)")
             return {
                 "test_runs_initially": False,  # Test failed (as expected - bug exists)
                 "errors": test_output[:2000],  # Capture output for Coder context
