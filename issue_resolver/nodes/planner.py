@@ -1,54 +1,66 @@
+"""Planner Agent Node — generates structured implementation plans.
+
+Produces structured JSON plans including dependency graphs, affected modules,
+confidence scores, test strategy, and rollback plans.
+"""
+
 from __future__ import annotations
 
+import json
+import re
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from issue_resolver.state import AgentState
 from issue_resolver.utils.logger import append_to_history
-from issue_resolver.config import PLANNER_MODEL_CANDIDATES, NVIDIA_CONTEXT_WINDOWS
+from issue_resolver.config import PLANNER_MODEL_CANDIDATES, PLANNER_MAX_ITERATIONS
 from issue_resolver.llm_utils import invoke_with_role_fallback, calculate_max_tokens
+from issue_resolver.core.prompt_registry import get_prompt_registry
+import issue_resolver.runtime_context as runtime_context
 
+# Register prompt template on import
+_SYSTEM_PROMPT = r"""You are the Planner. Given a GitHub issue and repository context, generate a structured JSON стратегический план.
 
-_SYSTEM_PROMPT = r"""\
-You are the Planner. Given a GitHub issue and code context, write a PLAIN-TEXT strategic plan.
+You must output a single JSON block wrapped in a ```json markdown block. Do not output any explanation outside of the code block.
 
-OUTPUT FORMAT:
-<plan>
-## Analysis
-- Root cause: [What's broken and why]
-- Scope: [What files must change]
-- Invariants to preserve: [Code contracts, interfaces, etc.]
+JSON Structure:
+{
+  "files_to_edit": ["string"],
+  "symbols_affected": ["string"],
+  "implementation_steps": [
+    {
+      "step": 1,
+      "file": "string",
+      "action": "string",
+      "depends_on": []
+    }
+  ],
+  "dependency_ordering": [1],
+  "execution_order": [1],
+  "affected_modules": ["string"],
+  "estimated_blast_radius": "low/medium/high",
+  "confidence_score": 0.0,
+  "assumptions": ["string"],
+  "unresolved_questions": ["string"],
+  "test_strategy": "string",
+  "risk_estimate": "low/medium/high",
+  "rollback_plan": "string"
+}
 
-## Strategy
-1. [Step 1 - which file, what change]
-2. [Step 2 - dependent change]
-3. [Step 3 - validation/test strategy]
-
-## Edge Cases
-- [Potential pitfall 1]
-- [Potential pitfall 2]
-</plan>
-
-CRITICAL RULES:
-1. Output ONLY the <plan> tags - no explanation before or after
-2. Be specific about which files and functions will change
-3. Reference line numbers if known from symbol map
-4. Think about edge cases and error handling
-5. Consider backwards compatibility
-6. DO NOT write code or test syntax - only strategy
-7. Keep it concise (under 300 words) but complete
-8. GENERAL vs. SPECIFIC: If an issue concerns parameter serialization, data formats, parsing, or type encoding, prioritize finding and fixing the general serialization/utility components (e.g., encoders, helper classes, or common formatters) rather than target wrappers or specific endpoint resources.
-
-DEFENSIVE CODING FOR OPTIONAL ATTRIBUTES:
-When accessing attributes that may not exist on all instances:
-  - Recommend: getattr(obj, 'attribute_name', default_value)
-  - Recommend: if hasattr(obj, 'attribute_name'): value = obj.attribute_name
-  - Alternative: try/except AttributeError blocks for attribute access
-  - Avoid: Accessing obj.attribute_name directly without checks
+Critical Rules:
+1. "dependency_ordering" and "execution_order" should specify step numbers in sequence.
+2. Under "test_strategy", specify how tests will verify the change (e.g. pytest commands, unittest assertions).
+3. "confidence_score" should be between 0.0 and 1.0 based on available context.
+4. "implementation_steps" must list incremental modifications with explicit dependencies.
+5. If the issue is about parsing, serialization, or type formatting, prioritize modifications to general utilities/encoders over specific wrappers or endpoints.
+6. Keep the scope of edits minimal and precise. Avoid massive repository-wide code edits.
 """
+
+get_prompt_registry().register("planner", "2.0", _SYSTEM_PROMPT)
 
 
 def planner_node(state: AgentState) -> dict:
-    print("[Planner] Generating fix strategy...")
+    """Generate structured fix strategy."""
+    print("[Planner] Generating structured fix strategy...")
 
     issue_text = state.get("issue", "(no issue)")
     file_context = state.get("file_context", [])
@@ -56,7 +68,6 @@ def planner_node(state: AgentState) -> dict:
     iterations = state.get("iterations", 0)
     plan_iteration = state.get("plan_iteration", 0)
 
-    from issue_resolver.config import PLANNER_MAX_ITERATIONS
     if plan_iteration >= PLANNER_MAX_ITERATIONS:
         print(f"[Planner] Plan refinement limit ({PLANNER_MAX_ITERATIONS}) reached")
         return {
@@ -69,55 +80,44 @@ def planner_node(state: AgentState) -> dict:
             ),
         }
 
+    # Retrieve profile and intelligence summaries
+    repo_profile = state.get("repo_profile", {})
+    repo_profile_summary = ""
+    if repo_profile:
+        repo_profile_summary = f"Language: {repo_profile.get('primary_language')}\nFramework: {repo_profile.get('framework')}\nTesting: {repo_profile.get('test_framework')}"
+
+    # Format planning prompt
     context_parts = []
-
-    first_model = (
-        PLANNER_MODEL_CANDIDATES[0]
-        if PLANNER_MODEL_CANDIDATES
-        else "nvidia/nemotron-3-super-120b-a12b"
-    )
-    context_window = NVIDIA_CONTEXT_WINDOWS.get(first_model, 131_072)
-
-    available_for_context = context_window - 4000
-
-    truncated_symbol_map = symbol_map
-
-    if truncated_symbol_map:
-        context_parts.append(f"## Symbol Map (Top Functions/Classes)\n{truncated_symbol_map}")
+    if repo_profile_summary:
+        context_parts.append(f"## Repository Profile\n{repo_profile_summary}")
 
     if file_context:
-        truncated_file_context = file_context[:4]
-        context_parts.append(
-            f"## Code Context\n" + "\n\n".join(truncated_file_context)
-        )
+        context_parts.append(f"## Code Context\n" + "\n\n".join(file_context[:4]))
 
     context_str = "\n\n".join(context_parts) if context_parts else "(no context available)"
 
-    print(f"[Planner] Context optimization: {first_model} (window={context_window})")
+    prompt_content = f"""Issue Description:
+{issue_text}
 
-    prompt_content = f"""{issue_text}
-
-## Repository Structure
+## Repository Context
 {context_str}
 
-Based on the issue and repository context above, write a detailed fix strategy.
+Generate a structured plan in JSON format.
 """
 
     messages = [
-        SystemMessage(content=_SYSTEM_PROMPT),
+        SystemMessage(content=get_prompt_registry().get("planner")),
         HumanMessage(content=prompt_content),
     ]
 
-    estimated_input_tokens = (len(_SYSTEM_PROMPT) + len(prompt_content)) // 4
-    max_tokens = calculate_max_tokens(first_model, estimated_input_tokens, ratio=0.4)
-
     try:
         resp, chosen_model = invoke_with_role_fallback(
-            role="Planner",
+            role="planner",
             candidates=PLANNER_MODEL_CANDIDATES,
             messages=messages,
             temperature=0.0,
-            max_tokens=max_tokens,
+            max_tokens=4096,
+            context={"issue_category": state.get("issue_category", "Bug")},
         )
         print(f"[Planner] Using model: {chosen_model}")
     except Exception as exc:
@@ -138,26 +138,59 @@ Based on the issue and repository context above, write a detailed fix strategy.
             "history": append_to_history("Planner", "Error", "Empty response"),
         }
 
-    plan = ""
-    s, e = raw.find("<plan>"), raw.find("</plan>")
-    if s != -1 and e != -1:
-        plan = raw[s + 6 : e].strip()
+    # Extract JSON block
+    json_block = ""
+    m = re.search(r"```json\s*(.*?)\s*```", raw, re.DOTALL)
+    if m:
+        json_block = m.group(1).strip()
     else:
-        plan = raw.strip()
+        # Try finding raw JSON structure
+        m = re.search(r"(\{.*\})", raw, re.DOTALL)
+        if m:
+            json_block = m.group(1).strip()
 
-    if not plan:
-        return {
-            "errors": "Could not extract plan from LLM output",
-            "iterations": iterations + 1,
-            "file_context": file_context,
-            "history": append_to_history("Planner", "Parse Failed", raw[:300]),
+    if not json_block:
+        # Fallback to saving raw response if JSON formatting fails
+        print("[Planner] [WARNING] Could not parse markdown block. Using raw string.")
+        json_block = raw.strip()
+
+    # Verify JSON structure
+    plan_dict = {}
+    try:
+        plan_dict = json.loads(json_block)
+        print(f"[Planner] Plan successfully parsed as JSON with {len(plan_dict.get('implementation_steps', []))} steps")
+    except json.JSONDecodeError:
+        print("[Planner] [WARNING] Plan was not valid JSON. Storing as raw text.")
+        plan_dict = {
+            "raw_plan": json_block,
+            "files_to_edit": [],
+            "implementation_steps": [],
         }
 
-    print(f"[Planner] Plan generated ({len(plan)} chars)")
+    # Log plan execution trace
+    from issue_resolver.core.execution_trace import get_trace
+    trace = get_trace()
+    if trace:
+        trace.record(
+            "plan_generated",
+            "Planner",
+            "Generated implementation strategy",
+            details={
+                "model": chosen_model,
+                "files_to_edit": plan_dict.get("files_to_edit", []),
+                "confidence": plan_dict.get("confidence_score", 0.0),
+                "blast_radius": plan_dict.get("estimated_blast_radius", "unknown"),
+            },
+        )
+
     return {
-        "plan": plan,
+        "plan": json.dumps(plan_dict, indent=2),
+        "structured_plan": plan_dict,
         "plan_iteration": plan_iteration + 1,
         "iterations": iterations + 1,
-        "file_context": file_context,
-        "history": append_to_history("Planner", "Strategy Generated", plan[:400]),
+        "history": append_to_history(
+            "Planner",
+            "Strategy Generated",
+            f"Proposed changes to: {', '.join(plan_dict.get('files_to_edit', [])) or 'none'}",
+        ),
     }

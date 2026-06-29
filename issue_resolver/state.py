@@ -39,3 +39,16 @@ class AgentState(TypedDict):
     environment_config: dict
     contribution_guidelines: str
     history: Annotated[list[dict], operator.add]
+
+    # v2 State Fields
+    issue_category: str
+    repo_intelligence: dict
+    repo_profile: dict
+    context_confidence: dict
+    structured_plan: dict
+    candidate_patches: list[dict]
+    candidate_scores: list[dict]
+    critique_results: list[dict]
+    verification_report: dict
+    execution_trace: list[dict]
+

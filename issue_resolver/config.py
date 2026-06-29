@@ -26,13 +26,27 @@ NVIDIA_API_KEY_TIER2: str = os.environ.get("NVIDIA_API_KEY_TIER2", "")
 NVIDIA_API_KEY_TIER3: str = os.environ.get("NVIDIA_API_KEY_TIER3", "")
 NVIDIA_API_KEY_TIER4: str = os.environ.get("NVIDIA_API_KEY_TIER4", "")
 
+# New Role API Keys
+NVIDIA_API_KEY_CLASSIFIER: str = os.environ.get("NVIDIA_API_KEY_CLASSIFIER", NVIDIA_API_KEY_TIER2)
+NVIDIA_API_KEY_ANALYST: str = os.environ.get("NVIDIA_API_KEY_ANALYST", NVIDIA_API_KEY_TIER1)
+NVIDIA_API_KEY_PLANNER: str = os.environ.get("NVIDIA_API_KEY_PLANNER", NVIDIA_API_KEY_TIER1)
+NVIDIA_API_KEY_CODER: str = os.environ.get("NVIDIA_API_KEY_CODER", NVIDIA_API_KEY_TIER1)
+NVIDIA_API_KEY_BUGFIX: str = os.environ.get("NVIDIA_API_KEY_BUGFIX", NVIDIA_API_KEY_TIER2)
+NVIDIA_API_KEY_REVIEWER: str = os.environ.get("NVIDIA_API_KEY_REVIEWER", NVIDIA_API_KEY_TIER1)
+
 MODEL_API_KEY_MAP: dict[str, str] = {
     "nvidia/nemotron-3-super-120b-a12b": NVIDIA_API_KEY_TIER1,
     "meta/llama-3.3-70b-instruct": NVIDIA_API_KEY_TIER2,
     "nvidia/llama-3.3-nemotron-super-49b-v1.5": NVIDIA_API_KEY_TIER3,
     "meta/llama-3.1-8b-instruct": NVIDIA_API_KEY_TIER4,
     "nvidia/llama-3.1-nemotron-nano-8b-v1": NVIDIA_API_KEY_TIER3,
+    "z-ai/glm-5.1": NVIDIA_API_KEY_PLANNER,
+    "qwen/qwen3.5-122b-a10b": NVIDIA_API_KEY_ANALYST,
+    "openai/gpt-oss-120b": NVIDIA_API_KEY_CODER,
+    "deepseek-ai/deepseek-v4-flash": NVIDIA_API_KEY_BUGFIX,
+    "nvidia/nemotron-3-ultra-550b-a55b": NVIDIA_API_KEY_REVIEWER,
 }
+
 
 SUPERVISOR_MODEL_CANDIDATES: list[str] = _parse_model_list(
     "NVIDIA_SUPERVISOR_MODELS",

@@ -193,15 +193,13 @@ def _extract_line_numbers(error_text: str) -> str:
 def reviewer_node(state: AgentState) -> dict:
     proposed_fix = state.get("proposed_fix", "")
     repo_path = state.get("repo_path", "")
-    test_code = state.get("test_code", "")
-    test_file_path = state.get("test_file_path", "")
-    file_context = state.get("file_context", [])
-    environment_config = state.get("environment_config", {})
-    env_type = (
-        environment_config.get("environment_type", "python")
-        if isinstance(environment_config, dict)
-        else "python"
-    )
+    structured_plan = state.get("structured_plan", {})
+    files_to_edit = structured_plan.get("files_to_edit", [])
+
+    if not files_to_edit and proposed_fix:
+        patched_file = _extract_patched_file_path(proposed_fix)
+        if patched_file:
+            files_to_edit = [patched_file]
 
     if not proposed_fix:
         print("[Reviewer] [WARN] No proposed fix found in state.")
@@ -213,153 +211,115 @@ def reviewer_node(state: AgentState) -> dict:
             "history": append_to_history("Reviewer", "Failure", "No fix proposed to review."),
         }
 
+    # 1. First run basic AST pre-validation check if python file
     patched_file = _extract_patched_file_path(proposed_fix)
     if patched_file:
         lang = _detect_language_from_path(patched_file)
-        print(f"[Reviewer] [AST] Validating syntax for '{patched_file}' (lang={lang})")
+        if lang == "python":
+            print(f"[Reviewer] [AST] Validating syntax for '{patched_file}'")
+            from issue_resolver.nodes.coder import _extract_file_info
+            file_info = _extract_file_info(state.get("file_context", []))
+            matched_path = patched_file.lstrip("./")
+            original_content = file_info.get(matched_path, "")
 
-        from issue_resolver.nodes.coder import _extract_file_info
-        file_info = _extract_file_info(file_context)
+            if original_content:
+                patched_content = _apply_diff_to_content(original_content, proposed_fix)
+                if patched_content:
+                    ast_ok, ast_error = _ast_validate(patched_content, lang, patched_file)
+                    if not ast_ok:
+                        print(f"[Reviewer] [AST FAIL] {ast_error}")
+                        return {
+                            "errors": f"AST validation failed: {ast_error}",
+                            "validation_status": "failed",
+                            "ast_validation_passed": False,
+                            "ast_error_detail": ast_error,
+                            "proposed_fix": "",
+                            "history": append_to_history(
+                                "Reviewer",
+                                "AST Validation Failed",
+                                f"Syntax error detected before sandbox execution: {ast_error}",
+                            ),
+                        }
 
-        matched_path = patched_file.lstrip("./")
-        original_content = file_info.get(matched_path, "")
-
-        if original_content:
-            patched_content = _apply_diff_to_content(original_content, proposed_fix)
-            if patched_content:
-                ast_ok, ast_error = _ast_validate(patched_content, lang, patched_file)
-                if not ast_ok:
-                    print(f"[Reviewer] [AST FAIL] {ast_error}")
-                    return {
-                        "errors": f"AST validation failed: {ast_error}",
-                        "validation_status": "failed",
-                        "ast_validation_passed": False,
-                        "ast_error_detail": ast_error,
-                        "proposed_fix": "",
-                        "history": append_to_history(
-                            "Reviewer",
-                            "AST Validation Failed",
-                            f"Syntax error detected before test execution: {ast_error}",
-                        ),
-                    }
-                print("[Reviewer] [AST OK] Syntax validation passed")
-            else:
-                print("[Reviewer] [AST SKIP] Could not apply diff for pre-validation")
-        else:
-            print(f"[Reviewer] [AST SKIP] Original content for '{matched_path}' not in context")
-
+    # 2. Run sandbox verification pipeline
+    from issue_resolver.utils.verifier import VerificationPipeline
+    pipeline = VerificationPipeline(repo_path)
+    
+    # Run the verification steps on changed files
+    print("[Reviewer] Applying and validating patch using the verification pipeline...")
+    
     try:
-        print("[Reviewer] Applying proposed fix in the sandbox...")
+        # First, apply the proposed diff in the sandbox
         patch_output = apply_diff_in_sandbox(proposed_fix, repo_path)
-
-        if test_code and test_file_path:
-            print(
-                f"[Reviewer] [TEST-DRIVEN] Test file '{test_file_path}' "
-                f"will be validated after fix is applied."
-            )
-
         if "Error" in patch_output:
             if "Sandbox container not found" in patch_output:
-                print("[Reviewer] Docker sandbox unavailable -- validation inconclusive.")
+                print("[Reviewer] Sandbox container not found - validation inconclusive.")
                 return {
                     "errors": "",
                     "validation_status": "inconclusive",
-                    "ast_validation_passed": True,
-                    "ast_error_detail": "",
                     "history": append_to_history(
                         "Reviewer",
                         "Skipped",
-                        "Docker sandbox unavailable. Fix generated but not validated.",
+                        "Sandbox container not found. Skipping verification.",
                     ),
                 }
-            print("[Reviewer] [FAIL] Patch failed to apply.")
+            print(f"[Reviewer] [FAIL] Patch failed to apply: {patch_output}")
             return {
                 "errors": f"Failed to apply patch:\n{patch_output}",
                 "validation_status": "failed",
-                "ast_validation_passed": True,
-                "ast_error_detail": "",
                 "history": append_to_history("Reviewer", "Apply Patch Failed", patch_output),
             }
 
-        print("[Reviewer] Running validation in sandbox...")
-        success, output = run_tests_in_sandbox(proposed_fix)
+        # Run verification steps
+        report = pipeline.run(files_to_edit)
+        success = report["passed"]
 
-        parsed_summary = format_parsed_error_summary(env_type, output)
+        # Aggregate output details
+        output_parts = []
+        for step in report["results"]:
+            if not step["passed"]:
+                output_parts.append(f"[{step['step_name']} FAIL]\n{step['output']}")
 
-        condensed = parsed_summary
+        error_summary = "\n\n".join(output_parts)
+        condensed = error_summary
+        
         if not success:
-            prompt = (
-                "Summarize this build/test failure for a coding agent in one line. "
-                "Include the most actionable file/line/error token.\n\n"
-                f"Environment: {env_type}\n"
-                f"Parsed: {parsed_summary}\n"
-                f"Raw:\n{output[:3000]}"
-            )
-            try:
-                resp, _ = invoke_with_role_fallback(
-                    role="Reviewer",
-                    candidates=REVIEWER_MODEL_CANDIDATES,
-                    messages=[HumanMessage(content=prompt)],
-                    temperature=0,
-                    max_tokens=180,
-                )
-                llm_summary = (getattr(resp, "content", "") or "").strip()
-                if llm_summary:
-                    condensed = llm_summary
-            except Exception as exc:
-                print(f"[Reviewer] [WARN] Reviewer summarizer unavailable: {exc}")
-
-        history_payload = f"{condensed}\n\n[RAW]\n{output[:5000]}"
-        history_additions = append_to_history("Reviewer", "Test Execution", history_payload)
-
-        if success:
-            print("[Reviewer] [OK] Code ran successfully.")
+            # Categorize the failures
+            error_category = _categorize_error(error_summary)
+            error_line_numbers = _extract_line_numbers(error_summary)
+            
+            history_payload = f"Verification failed:\n{error_summary}"
+            history_additions = append_to_history("Reviewer", "Test Execution", history_payload)
+            
             return {
-                "errors": "",
-                "validation_status": "passed",
+                "errors": condensed,
+                "validation_status": "failed",
+                "error_category": error_category,
+                "test_error_context": error_summary[:500],
+                "error_line_numbers": error_line_numbers,
                 "ast_validation_passed": True,
                 "ast_error_detail": "",
+                "verification_report": report,
                 "history": history_additions,
             }
-
-        print("[Reviewer] [FAIL] Code execution failed.")
-
-        error_category = _categorize_error(output)
-        error_line_numbers = _extract_line_numbers(output)
-
-        print(f"[Reviewer] Error category: {error_category}, Lines: {error_line_numbers}")
-
+        
+        print("[Reviewer] [OK] All verification steps passed successfully.")
         return {
-            "errors": condensed,
-            "validation_status": "failed",
-            "error_category": error_category,
-            "test_error_context": output[:500],
-            "error_line_numbers": error_line_numbers,
+            "errors": "",
+            "validation_status": "passed",
             "ast_validation_passed": True,
             "ast_error_detail": "",
-            "history": history_additions,
+            "verification_report": report,
+            "history": append_to_history("Reviewer", "Verification Passed", "All tests and checks passed."),
         }
 
     except Exception as exc:
-        error_msg = str(exc)
-        print(f"[Reviewer] [ERROR] Exception: {error_msg}")
-        if "docker" in error_msg.lower() or "CreateFile" in error_msg:
-            print("[Reviewer] Docker unavailable -- validation inconclusive.")
-            return {
-                "errors": "",
-                "validation_status": "inconclusive",
-                "ast_validation_passed": True,
-                "ast_error_detail": "",
-                "history": append_to_history(
-                    "Reviewer",
-                    "Skipped",
-                    "Docker unavailable. Fix generated but not validated in sandbox.",
-                ),
-            }
+        print(f"[Reviewer] [ERROR] Exception: {exc}")
         return {
-            "errors": f"Reviewer error: {error_msg}",
+            "errors": f"Reviewer validation error: {exc}",
             "validation_status": "failed",
             "ast_validation_passed": True,
             "ast_error_detail": "",
-            "history": append_to_history("Reviewer", "Error", error_msg),
+            "history": append_to_history("Reviewer", "Error", str(exc)),
         }
+

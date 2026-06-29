@@ -13,12 +13,30 @@ from issue_resolver.nodes import (
     coder_node,
     reviewer_node,
     failure_handler_node,
+    issue_classifier_node,
+    repo_intelligence_node,
+    repo_analyst_node,
+    context_curator_node,
+    candidate_generator_node,
+    candidate_evaluator_node,
+    incremental_patcher_node,
+    parallel_reviewers_node,
+    self_critique_node,
+    debugger_node,
 )
+
+# ---------------------------------------------------------------------------
+# Subgraph States
+# ---------------------------------------------------------------------------
 
 class WorkspaceDiscoveryState(TypedDict):
     issue: str
     repo_path: str
+    issue_category: str
+    repo_intelligence: dict
+    repo_profile: dict
     file_context: list[str]
+    context_confidence: dict
     symbol_map: str
     plan: str
     plan_iteration: int
@@ -32,8 +50,11 @@ class PatchEngineeringState(TypedDict):
     issue: str
     repo_path: str
     plan: str
+    structured_plan: dict
     file_context: list[str]
     coder_retry_budget: int
+    candidate_patches: list[dict]
+    candidate_scores: list[dict]
     proposed_fix: str
     errors: str
     iterations: int
@@ -51,62 +72,104 @@ class VerificationState(TypedDict):
     issue: str
     repo_path: str
     plan: str
+    structured_plan: dict
     file_context: list[str]
+    proposed_fix: str
     test_code: str
     test_file_path: str
     test_framework_used: str
     test_runs_initially: bool
     errors: str
     iterations: int
+    critique_results: list[dict]
     history: Annotated[list[dict], operator.add]
     environment_config: dict
 
+# ---------------------------------------------------------------------------
+# Subgraph Routing Decisions
+# ---------------------------------------------------------------------------
+
 def _route_patch_reviewer(state: PatchEngineeringState) -> str:
-    ast_pass = state.get("ast_validation_passed", True)
     val_status = state.get("validation_status", "")
     budget = state.get("coder_retry_budget", 0)
-    if (not ast_pass or val_status == "failed") and budget > 0:
-        return "coder"
+    if val_status == "failed" and budget > 0:
+        return "debugger"
     return "end"
 
+# ---------------------------------------------------------------------------
+# Subgraphs Construction
+# ---------------------------------------------------------------------------
+
+# 1. Workspace Discovery Subgraph
 wd_builder = StateGraph(WorkspaceDiscoveryState)
 wd_builder.add_node("setup", setup_node)
+wd_builder.add_node("issue_classifier", issue_classifier_node)
+wd_builder.add_node("repo_intelligence_node", repo_intelligence_node)
+wd_builder.add_node("repo_analyst", repo_analyst_node)
 wd_builder.add_node("researcher", researcher_node)
+wd_builder.add_node("context_curator", context_curator_node)
 wd_builder.add_node("planner", planner_node)
+
 wd_builder.set_entry_point("setup")
-wd_builder.add_edge("setup", "researcher")
-wd_builder.add_edge("researcher", "planner")
+wd_builder.add_edge("setup", "issue_classifier")
+wd_builder.add_edge("issue_classifier", "repo_intelligence_node")
+wd_builder.add_edge("repo_intelligence_node", "repo_analyst")
+wd_builder.add_edge("repo_analyst", "researcher")
+wd_builder.add_edge("researcher", "context_curator")
+wd_builder.add_edge("context_curator", "planner")
 wd_builder.add_edge("planner", END)
 wd_graph = wd_builder.compile()
 
+# 2. Patch Engineering Subgraph
 pe_builder = StateGraph(PatchEngineeringState)
-pe_builder.add_node("coder", coder_node)
+pe_builder.add_node("candidate_generator", candidate_generator_node)
+pe_builder.add_node("candidate_evaluator", candidate_evaluator_node)
+pe_builder.add_node("incremental_patcher", incremental_patcher_node)
 pe_builder.add_node("reviewer", reviewer_node)
-pe_builder.set_entry_point("coder")
-pe_builder.add_edge("coder", "reviewer")
+pe_builder.add_node("debugger", debugger_node)
+
+pe_builder.set_entry_point("candidate_generator")
+pe_builder.add_edge("candidate_generator", "candidate_evaluator")
+pe_builder.add_edge("candidate_evaluator", "incremental_patcher")
+pe_builder.add_edge("incremental_patcher", "reviewer")
 pe_builder.add_conditional_edges(
     "reviewer",
     _route_patch_reviewer,
     {
-        "coder": "coder",
+        "debugger": "debugger",
         "end": END
     }
 )
+pe_builder.add_edge("debugger", "candidate_generator")
 pe_graph = pe_builder.compile()
 
+# 3. Verification Subgraph
 v_builder = StateGraph(VerificationState)
 v_builder.add_node("test_generator", testgen_node)
 v_builder.add_node("test_validator", test_validator_node)
+v_builder.add_node("parallel_reviewers", parallel_reviewers_node)
+v_builder.add_node("self_critique", self_critique_node)
+
 v_builder.set_entry_point("test_generator")
 v_builder.add_edge("test_generator", "test_validator")
-v_builder.add_edge("test_validator", END)
+v_builder.add_edge("test_validator", "parallel_reviewers")
+v_builder.add_edge("parallel_reviewers", "self_critique")
+v_builder.add_edge("self_critique", END)
 v_graph = v_builder.compile()
+
+# ---------------------------------------------------------------------------
+# Node Wrappers for Main Graph
+# ---------------------------------------------------------------------------
 
 def workspace_discovery_node(state: AgentState) -> dict:
     sub_state = {
         "issue": state.get("issue"),
         "repo_path": state.get("repo_path"),
+        "issue_category": state.get("issue_category", "Bug"),
+        "repo_intelligence": state.get("repo_intelligence", {}),
+        "repo_profile": state.get("repo_profile", {}),
         "file_context": list(state.get("file_context", [])),
+        "context_confidence": state.get("context_confidence", {}),
         "symbol_map": state.get("symbol_map", ""),
         "plan": state.get("plan", ""),
         "plan_iteration": state.get("plan_iteration", 0),
@@ -119,13 +182,17 @@ def workspace_discovery_node(state: AgentState) -> dict:
     res = wd_graph.invoke(sub_state)
     return {
         "plan": res.get("plan"),
+        "issue_category": res.get("issue_category"),
+        "repo_intelligence": res.get("repo_intelligence"),
+        "repo_profile": res.get("repo_profile"),
         "file_context": res.get("file_context"),
+        "context_confidence": res.get("context_confidence"),
         "symbol_map": res.get("symbol_map"),
         "environment_config": res.get("environment_config"),
         "iterations": res.get("iterations"),
         "current_view_file": res.get("current_view_file"),
         "current_view_line": res.get("current_view_line"),
-        "history": [{"node": "WorkspaceDiscovery", "action": "Complete", "content": "Discovery phase complete. Plan generated."}],
+        "history": [{"node": "WorkspaceDiscovery", "action": "Complete", "content": "Discovery and intelligence gathering complete. Plan generated."}],
     }
 
 def verification_node(state: AgentState) -> dict:
@@ -133,13 +200,16 @@ def verification_node(state: AgentState) -> dict:
         "issue": state.get("issue"),
         "repo_path": state.get("repo_path"),
         "plan": state.get("plan"),
+        "structured_plan": state.get("structured_plan", {}),
         "file_context": list(state.get("file_context", [])),
+        "proposed_fix": state.get("proposed_fix", ""),
         "test_code": state.get("test_code", ""),
         "test_file_path": state.get("test_file_path", ""),
         "test_framework_used": state.get("test_framework_used", "pytest"),
         "test_runs_initially": state.get("test_runs_initially"),
         "errors": state.get("errors", ""),
         "iterations": state.get("iterations", 0),
+        "critique_results": state.get("critique_results", []),
         "history": [],
         "environment_config": state.get("environment_config", {}),
     }
@@ -149,18 +219,26 @@ def verification_node(state: AgentState) -> dict:
         "test_file_path": res.get("test_file_path"),
         "test_framework_used": res.get("test_framework_used"),
         "test_runs_initially": res.get("test_runs_initially"),
+        "critique_results": res.get("critique_results"),
         "errors": res.get("errors"),
         "iterations": res.get("iterations"),
         "history": [{"node": "Verification", "action": "Complete", "content": f"Verification complete. Runs initially: {res.get('test_runs_initially')}."}],
     }
 
 def patch_engineering_node(state: AgentState) -> dict:
+    # Decrement coder retry budget on invocation
+    curr_budget = state.get("coder_retry_budget", 3)
+    new_budget = max(0, curr_budget - 1)
+    
     sub_state = {
         "issue": state.get("issue"),
         "repo_path": state.get("repo_path"),
         "plan": state.get("plan"),
+        "structured_plan": state.get("structured_plan", {}),
         "file_context": list(state.get("file_context", [])),
-        "coder_retry_budget": state.get("coder_retry_budget", 3),
+        "coder_retry_budget": new_budget,
+        "candidate_patches": state.get("candidate_patches", []),
+        "candidate_scores": state.get("candidate_scores", []),
         "proposed_fix": state.get("proposed_fix", ""),
         "errors": state.get("errors", ""),
         "iterations": state.get("iterations", 0),
@@ -193,12 +271,17 @@ def _route_parent(state: AgentState) -> str:
         return "end"
     return "failure_handler"
 
+# ---------------------------------------------------------------------------
+# Main Graph Build
+# ---------------------------------------------------------------------------
+
 def build_graph() -> StateGraph:
     graph = StateGraph(AgentState)
     graph.add_node("workspace_discovery", workspace_discovery_node)
     graph.add_node("verification", verification_node)
     graph.add_node("patch_engineering", patch_engineering_node)
     graph.add_node("failure_handler", failure_handler_node)
+    
     graph.set_entry_point("workspace_discovery")
     graph.add_edge("workspace_discovery", "verification")
     graph.add_edge("verification", "patch_engineering")
@@ -212,7 +295,7 @@ def build_graph() -> StateGraph:
     )
     graph.add_edge("failure_handler", END)
     compiled = graph.compile()
-    print("[OK] Graph compiled successfully!")
+    print("[OK] LangGraph state machine compiled successfully!")
     return compiled
 
 app = build_graph()
