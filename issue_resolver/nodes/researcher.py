@@ -34,27 +34,30 @@ _TOOL_MAP = {
 }
 
 _SYSTEM_PROMPT = """\
-You are the Researcher agent. Find the source code relevant to a GitHub issue FAST.
+You are the Researcher agent (FALLBACK MODE). The deterministic Localizer has
+already attempted to locate relevant code but had low confidence. Your job is
+to find what the Localizer missed.
+
+You will receive a list of entities that the Localizer could NOT resolve in the
+knowledge graph. Focus your search on THOSE entities only — do not re-search
+entities already found.
 
 Available tools:
-  read_file(file_path)               - Read a file (truncated at 500 lines). USE THIS FIRST if you know the file.
+  read_file(file_path)               - Read a file (truncated at 500 lines).
   search_code(query, directory)      - Grep for a string across code files.
   get_symbol_definition(symbol, dir) - Find where a function/class is defined.
-  generate_repo_map(directory)       - Get a tree view of the repo structure. ONLY if you don't know where to look.
+  generate_repo_map(directory)       - Get a tree view of the repo structure.
   list_files(directory)              - List code files in a specific folder.
 
 SPEED RULES:
-1. If the issue mentions a SPECIFIC FILE PATH, call read_file() IMMEDIATELY.
-2. If the issue has a HINT, follow the hint directly with read_file().
-3. Only call generate_repo_map() if you have NO idea where the relevant code is.
-4. Target searches to SPECIFIC folders, never search root '.'.
-5. Read up to 3 target files. Multi-file context is often needed.
-6. After reading 3 files OR hitting the line limit, STOP and summarize findings.
+1. Search ONLY for the missed entities listed below.
+2. Target searches to SPECIFIC folders, never search root '.'.
+3. Read up to 2 target files. Stop after finding context.
+4. After reading 2 files OR 2 tool rounds, STOP and summarize.
 
 CONSTRAINTS:
-- NEVER read more than 3 files total.
+- NEVER read more than 2 files total.
 - NEVER use list_files on root directory for large repos.
-- Prefer search_code with specific folder paths over broad searches.
 - When done, simply state what you found.
 """
 
@@ -371,29 +374,43 @@ def _manage_context_budget(file_context: list[str]) -> list[str]:
 
 
 def researcher_node(state: AgentState) -> dict:
-    print("[Researcher] Starting codebase exploration...")
+    """Researcher fallback — only runs when Localizer confidence is low."""
+    localization = state.get("localization_result", {})
+    localization_confidence = state.get("localization_confidence", 0.0)
+
+    # Skip entirely if Localizer is confident
+    if localization_confidence >= 0.7:
+        print(f"[Researcher] Localizer confidence={localization_confidence:.2f} >= 0.7, skipping fallback.")
+        return {
+            "history": append_to_history(
+                "Researcher",
+                "Skipped",
+                f"Localizer confidence {localization_confidence:.2f} >= 0.7, researcher not needed.",
+            ),
+        }
+
+    print(f"[Researcher] Running as FALLBACK (Localizer confidence={localization_confidence:.2f})...")
     state_updates = {}
 
     repo_path = state.get("repo_path", ".")
     issue_text = state.get("issue", "(no issue provided)")
     errors = state.get("errors", "")
 
+    # Focus on what the Localizer missed
+    missed_entities = localization.get("missed_entities", [])
+    already_found_files = [f["path"] for f in localization.get("primary_files", [])]
+
     human_str = f"GitHub Issue:\n{issue_text}\n\nRepository path: {repo_path}\n\n"
+
+    if missed_entities:
+        human_str += f"## Entities the Localizer could NOT resolve:\n"
+        for ent in missed_entities[:10]:
+            human_str += f"  - {ent}\n"
+        human_str += "\nFocus your search on THESE entities. "
+        human_str += f"The Localizer already found: {', '.join(already_found_files[:5])}\n\n"
+
     if errors:
         human_str += f"Supervisor Feedback/Errors:\n{errors}\n\n"
-
-    issue_lower = issue_text.lower()
-    if any(kw in issue_lower for kw in ["encod", "eci", "utf-8", "utf8", "charset", "character encode"]):
-        human_str += "HINT: This is an ENCODING issue. Look for classes/enums with names like:\n"
-        human_str += "  - Data, Generator, Encoder, Manager\n"
-        human_str += "  - Methods: Encode, Compress, Prepare, SetEncoding\n"
-        human_str += "  - Enums: EncodingMode, ECI, Compression, CharacterSet\n"
-        human_str += "Search for these patterns first.\n\n"
-    elif any(kw in issue_lower for kw in ["null", "npe", "exception", "error"]):
-        human_str += "HINT: This is an ERROR handling issue. Look for:\n"
-        human_str += "  - Methods that could throw exceptions\n"
-        human_str += "  - Missing null checks or validations\n"
-        human_str += "  - Error handling patterns\n\n"
 
     human_str += "Please explore the repository and find the relevant code."
 

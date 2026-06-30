@@ -18,7 +18,7 @@ from issue_resolver.core.prompt_registry import get_prompt_registry
 # Register prompt template on import
 _DEFAULT_PROMPT = """\
 You are an expert code reviewer. You are given a bug description, code context, and a proposed code patch.
-Evaluate this patch along the following six dimensions, giving each a score from 0.0 to 10.0:
+Evaluate this patch along the following seven dimensions, giving each a score from 0.0 to 10.0:
 
 1. Correctness: Does the patch resolve the core issue without causing new failures?
 2. Maintainability: Is the code clean, readable, and structured nicely?
@@ -26,6 +26,7 @@ Evaluate this patch along the following six dimensions, giving each a score from
 4. Style Consistency: Does the code adhere to the rest of the repository's conventions?
 5. Performance: Does the change avoid causing any performance regressions?
 6. Risk: How likely is this to break other systems (high score means low risk, i.e. 10.0 = completely safe, 0.0 = highly risky)?
+7. Repository Consistency: Does it follow the repository naming conventions, import styles, design patterns, and framework integration patterns as detailed in the repository context?
 
 You must output a single JSON block wrapped in a ```json markdown block:
 {
@@ -35,7 +36,8 @@ You must output a single JSON block wrapped in a ```json markdown block:
     "simplicity": 0.0,
     "style_consistency": 0.0,
     "performance": 0.0,
-    "risk": 0.0
+    "risk": 0.0,
+    "repository_consistency": 0.0
   },
   "rationale": "Brief rationale for scores"
 }
@@ -46,11 +48,12 @@ get_prompt_registry().register("candidate_evaluator", "1.0", _DEFAULT_PROMPT)
 # Evaluation weights
 _WEIGHTS = {
     "correctness": 0.30,
-    "maintainability": 0.20,
+    "maintainability": 0.15,
     "simplicity": 0.15,
-    "style_consistency": 0.15,
+    "style_consistency": 0.10,
     "performance": 0.10,
     "risk": 0.10,
+    "repository_consistency": 0.10,
 }
 
 

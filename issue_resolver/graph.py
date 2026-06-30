@@ -6,9 +6,11 @@ from langgraph.graph import StateGraph, END
 from issue_resolver.utils.logger import append_to_history
 
 from issue_resolver.state import AgentState
+from issue_resolver.state import AgentState
 from issue_resolver.nodes import (
     setup_node,
     researcher_node,
+    localizer_node,
     planner_node,
     testgen_node,
     test_validator_node,
@@ -49,6 +51,12 @@ class WorkspaceDiscoveryState(TypedDict):
     environment_config: dict
     current_view_file: str
     current_view_line: int
+    
+    # New discovery state
+    localization_result: dict
+    localization_confidence: float
+    issue_suitability: dict
+    classification_method: str
 
 class PatchEngineeringState(TypedDict):
     issue: str
@@ -97,9 +105,17 @@ class VerificationState(TypedDict):
 def _route_patch_reviewer(state: PatchEngineeringState) -> str:
     val_status = state.get("validation_status", "")
     budget = state.get("coder_retry_budget", 0)
-    if val_status == "failed" and budget > 0:
+    if val_status in ("failed", "applied_with_errors") and budget > 0:
         return "debugger"
     return "end"
+
+def _route_researcher(state: WorkspaceDiscoveryState) -> str:
+    loc_res = state.get("localization_result", {})
+    if loc_res.get("needs_researcher_fallback", True):
+        print("[Graph] Localizer confidence low, routing to Researcher fallback.")
+        return "researcher"
+    print("[Graph] Localizer confidence sufficient, skipping Researcher fallback.")
+    return "context_curator"
 
 # ---------------------------------------------------------------------------
 # Subgraphs Construction
@@ -108,20 +124,29 @@ def _route_patch_reviewer(state: PatchEngineeringState) -> str:
 # 1. Workspace Discovery Subgraph
 wd_builder = StateGraph(WorkspaceDiscoveryState)
 wd_builder.add_node("setup", setup_node)
-wd_builder.add_node("issue_classifier", issue_classifier_node)
-wd_builder.add_node("verification_type_classifier", verification_type_classifier_node)
 wd_builder.add_node("repo_intelligence_node", repo_intelligence_node)
 wd_builder.add_node("repo_analyst", repo_analyst_node)
+wd_builder.add_node("localizer", localizer_node)
+wd_builder.add_node("issue_classifier", issue_classifier_node)
+wd_builder.add_node("verification_type_classifier", verification_type_classifier_node)
 wd_builder.add_node("researcher", researcher_node)
 wd_builder.add_node("context_curator", context_curator_node)
 wd_builder.add_node("planner", planner_node)
 
 wd_builder.set_entry_point("setup")
-wd_builder.add_edge("setup", "issue_classifier")
-wd_builder.add_edge("issue_classifier", "verification_type_classifier")
-wd_builder.add_edge("verification_type_classifier", "repo_intelligence_node")
+wd_builder.add_edge("setup", "repo_intelligence_node")
 wd_builder.add_edge("repo_intelligence_node", "repo_analyst")
-wd_builder.add_edge("repo_analyst", "researcher")
+wd_builder.add_edge("repo_analyst", "localizer")
+wd_builder.add_edge("localizer", "issue_classifier")
+wd_builder.add_edge("issue_classifier", "verification_type_classifier")
+wd_builder.add_conditional_edges(
+    "verification_type_classifier",
+    _route_researcher,
+    {
+        "researcher": "researcher",
+        "context_curator": "context_curator"
+    }
+)
 wd_builder.add_edge("researcher", "context_curator")
 wd_builder.add_edge("context_curator", "planner")
 wd_builder.add_edge("planner", END)
@@ -186,6 +211,10 @@ def workspace_discovery_node(state: AgentState) -> dict:
         "environment_config": state.get("environment_config", {}),
         "current_view_file": state.get("current_view_file"),
         "current_view_line": state.get("current_view_line", 1),
+        "localization_result": state.get("localization_result", {}),
+        "localization_confidence": state.get("localization_confidence", 0.0),
+        "issue_suitability": state.get("issue_suitability", {}),
+        "classification_method": state.get("classification_method", ""),
     }
     res = wd_graph.invoke(sub_state)
     completion_entry = append_to_history("WorkspaceDiscovery", "Complete", "Discovery and intelligence gathering complete. Plan generated.")[0]
@@ -202,8 +231,13 @@ def workspace_discovery_node(state: AgentState) -> dict:
         "iterations": res.get("iterations"),
         "current_view_file": res.get("current_view_file"),
         "current_view_line": res.get("current_view_line"),
+        "localization_result": res.get("localization_result"),
+        "localization_confidence": res.get("localization_confidence"),
+        "issue_suitability": res.get("issue_suitability"),
+        "classification_method": res.get("classification_method"),
         "history": res.get("history", []) + [completion_entry],
     }
+
 
 def verification_node(state: AgentState) -> dict:
     sub_state = {

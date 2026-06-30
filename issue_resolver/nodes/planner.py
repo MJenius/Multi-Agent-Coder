@@ -109,6 +109,42 @@ def planner_node(state: AgentState) -> dict:
         confidence_lines = [f"- `{path}`: {conf} confidence" for path, conf in context_confidence.items()]
         repo_intel_parts.append("### Context File Confidence Scores:\n" + "\n".join(confidence_lines))
 
+    # Add structured localization results to intelligence context
+    localization_result = state.get("localization_result", {})
+    if localization_result:
+        loc_lines = [
+            "### Localization Results:",
+            f"- Overall Confidence: {localization_result.get('confidence', 0.0):.2f}",
+        ]
+        
+        primary_files = localization_result.get("primary_files", [])
+        if primary_files:
+            loc_lines.append("  - Primary Files:")
+            for f in primary_files[:5]:
+                loc_lines.append(f"    - `{f['path']}` (Score: {f['score']:.2f}, Confidence: {f['confidence']})")
+                
+        symbols = localization_result.get("symbols", [])
+        if symbols:
+            loc_lines.append("  - Symbols Found:")
+            for s in symbols[:10]:
+                loc_lines.append(f"    - `{s['name']}` ({s['kind']}) in `{s['file_path']}` lines {s['line_number']}-{s['end_line']} (Source: {s['source']})")
+                
+        references = localization_result.get("references", [])
+        if references:
+            loc_lines.append("  - References / Call Graph:")
+            for r in references[:5]:
+                loc_lines.append(f"    - {r}")
+                
+        test_files = localization_result.get("test_files", [])
+        if test_files:
+            loc_lines.append(f"  - Related Test Files: {', '.join(test_files[:5])}")
+            
+        deps = localization_result.get("dependency_neighbors", [])
+        if deps:
+            loc_lines.append(f"  - Import Dependency Neighbors: {', '.join(deps[:5])}")
+            
+        repo_intel_parts.append("\n".join(loc_lines))
+
     # Format planning prompt
     context_parts = []
     if repo_intel_parts:

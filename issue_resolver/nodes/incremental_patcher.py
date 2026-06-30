@@ -1,7 +1,8 @@
 """Incremental Patcher Node — applies and validates patch blocks incrementally.
 
 Applies SEARCH/REPLACE blocks one by one, running compilation and linting checks
-after each block to locate and isolate bugs quickly.
+after each block.  If a block fails compilation or linting, it is immediately
+reverted, and the error is recorded before continuing to apply the next block.
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ import re
 from issue_resolver.state import AgentState
 from issue_resolver.utils.logger import append_to_history
 from issue_resolver.utils.patch_engine import FuzzyPatchEngine
-from issue_resolver.tools.sandbox_tools import get_sandbox_container, apply_diff_in_sandbox
+from issue_resolver.tools.sandbox_tools import get_sandbox_container
 
 
 def _parse_blocks(llm_output: str) -> list[tuple[str, str]]:
@@ -37,16 +38,12 @@ def incremental_patcher_node(state: AgentState) -> dict:
     blocks = _parse_blocks(proposed_fix)
     if not blocks:
         print("[IncrementalPatcher] [WARNING] No SEARCH/REPLACE blocks found in proposed fix.")
-        # Try raw block parsing fallback if no blocks found
         return {"validation_status": "failed", "errors": "Patch parse failed: No SEARCH/REPLACE blocks found."}
 
     print(f"[IncrementalPatcher] Applying {len(blocks)} patch blocks incrementally...")
 
-    # Determine target files to apply blocks to
-    # Usually we match blocks against files_to_edit or guess based on content search
-    applied_count = 0
-    failed_block_idx = -1
-    failure_reason = ""
+    applied_blocks = []
+    failed_blocks = []
 
     for idx, (search_text, replace_text) in enumerate(blocks):
         block_applied = False
@@ -69,13 +66,10 @@ def incremental_patcher_node(state: AgentState) -> dict:
                     f.write(engine.file_content)
 
                 # Verify linting/compilation on the file immediately
-                from issue_resolver.utils.patch_engine import parse_and_apply_blocks
-                # Run the linter check by calling git reset on fail
                 lint_failed = False
                 lint_output = ""
                 sandbox = get_sandbox_container()
 
-                # Reuse verification check from patch_engine.py
                 if sandbox:
                     res_lint = sandbox.exec_run(f"ruff check {file_rel}", workdir="/workspace")
                     if res_lint.exit_code != 0:
@@ -111,23 +105,47 @@ def incremental_patcher_node(state: AgentState) -> dict:
                         sandbox.exec_run(f"git checkout -- {file_rel}", workdir="/workspace")
                     else:
                         subprocess.run(["git", "checkout", "--", file_abs], cwd=repo_path)
-                    failed_block_idx = idx
-                    failure_reason = f"Linter validation failed: {lint_output.strip()}"
-                    break
+                    failed_blocks.append({
+                        "index": idx,
+                        "file": file_rel,
+                        "reason": f"Linter/Compilation validation failed: {lint_output.strip()}"
+                    })
                 else:
                     block_applied = True
-                    applied_count += 1
+                    applied_blocks.append({
+                        "index": idx,
+                        "file": file_rel
+                    })
                     break
 
-        if failed_block_idx != -1:
-            break
-
-        if not block_applied:
+        if not block_applied and not any(fb["index"] == idx for fb in failed_blocks):
             # Reached here and no file accepted this block
             print(f"[IncrementalPatcher] Block {idx + 1} search content could not be matched in any source files.")
-            failed_block_idx = idx
-            failure_reason = "Search block content not matched in target files."
-            break
+            failed_blocks.append({
+                "index": idx,
+                "file": "unknown",
+                "reason": "Search block content not matched in target files."
+            })
+
+    # Summarize results
+    errors_summary = ""
+    if failed_blocks:
+        errors_summary = "\n".join(
+            f"Block {fb['index'] + 1} on {fb['file']} failed: {fb['reason']}"
+            for fb in failed_blocks
+        )
+
+    if not applied_blocks:
+        validation_status = "failed"
+        status_msg = f"Failed to apply all {len(blocks)} blocks. Errors:\n{errors_summary}"
+    elif failed_blocks:
+        validation_status = "applied_with_errors"
+        status_msg = f"Applied {len(applied_blocks)}/{len(blocks)} blocks successfully with errors:\n{errors_summary}"
+    else:
+        validation_status = "applied"
+        status_msg = f"Successfully applied all {len(blocks)} blocks."
+
+    print(f"[IncrementalPatcher] Result: {status_msg}")
 
     # Commit execution trace
     from issue_resolver.core.execution_trace import get_trace
@@ -136,32 +154,20 @@ def incremental_patcher_node(state: AgentState) -> dict:
         trace.record(
             "patch_applied_incrementally",
             "IncrementalPatcher",
-            f"Applied {applied_count}/{len(blocks)} blocks",
+            f"Applied {len(applied_blocks)}/{len(blocks)} blocks",
             details={
-                "success": failed_block_idx == -1,
-                "failed_block_index": failed_block_idx,
-                "failure_reason": failure_reason,
+                "validation_status": validation_status,
+                "applied_blocks": applied_blocks,
+                "failed_blocks": failed_blocks,
             },
         )
 
-    if failed_block_idx != -1:
-        return {
-            "validation_status": "failed",
-            "errors": f"Failed to apply block {failed_block_idx + 1}: {failure_reason}",
-            "history": append_to_history(
-                "IncrementalPatcher",
-                "Apply Patch Failed",
-                f"Block {failed_block_idx + 1} application failed: {failure_reason[:200]}",
-            ),
-        }
-
-    print(f"[IncrementalPatcher] Successfully applied all {len(blocks)} blocks.")
     return {
-        "validation_status": "applied",
-        "errors": "",
+        "validation_status": validation_status,
+        "errors": errors_summary,
         "history": append_to_history(
             "IncrementalPatcher",
-            "Apply Patch Success",
-            f"Successfully applied {applied_count} patch blocks.",
+            "Apply Patch Status",
+            status_msg[:300],
         ),
     }

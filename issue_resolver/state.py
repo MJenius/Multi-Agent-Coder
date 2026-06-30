@@ -53,3 +53,17 @@ class AgentState(TypedDict):
     verification_report: dict
     execution_trace: list[dict]
 
+    # Localization and Suitability State
+    localization_result: dict
+    localization_confidence: float
+    issue_suitability: dict
+    classification_method: str
+
+    # Execution Intelligence and Strategy
+    execution_intelligence: dict
+    adaptive_strategy: str
+
+    # Metrics
+    metrics: dict
+
+

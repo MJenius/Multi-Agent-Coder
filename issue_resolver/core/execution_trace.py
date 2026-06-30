@@ -141,6 +141,38 @@ class ExecutionTrace:
             details={"reason": reason, "attempt": attempt},
         )
 
+    def record_execution_intelligence(self, **kwargs: Any) -> TraceEvent:
+        """Record detailed telemetry for execution and adaptive decisions."""
+        return self.record(
+            "execution_intelligence",
+            "trace",
+            "recorded execution intelligence telemetry",
+            details=kwargs,
+        )
+
+    def get_retry_strategy(self) -> dict[str, Any]:
+        """Analyze previous errors and return recommendations for adaptive strategies."""
+        failures = [e for e in self.events if e.event_type == "retry"]
+        if len(failures) >= 2:
+            # Check what failed (compilation, testing, etc.) if recorded in details
+            reasons = [f.details.get("reason", "").lower() for f in failures]
+            recommendations = []
+            
+            if any("lint" in r or "compile" in r for r in reasons):
+                recommendations.append("generate_smaller_edits")
+                recommendations.append("focus_on_single_file")
+            else:
+                recommendations.append("retrieve_more_context")
+                recommendations.append("expand_dependency_graph")
+                
+            recommendations.append("change_approach")
+
+            return {
+                "strategy": "adaptive_retry",
+                "recommendations": list(set(recommendations))
+            }
+        return {"strategy": "continue", "recommendations": []}
+
     # ----- metrics -----
 
     def total_tokens(self) -> int:

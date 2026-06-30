@@ -1,0 +1,152 @@
+[
+  {
+    "repo_url": "https://github.com/requests/requests",
+    "issue_id": "req-01",
+    "issue_text": "TypeError when handling prepare_body on empty payload when encoding is utf-8",
+    "expected_files": ["requests/models.py"],
+    "expected_symbols": ["prepare_body"],
+    "expected_fix_type": "bug_fix",
+    "difficulty": "easy",
+    "language": "python"
+  },
+  {
+    "repo_url": "https://github.com/pallets/flask",
+    "issue_id": "flask-02",
+    "issue_text": "Flask app.route fails with TypeError when returning empty response tuple",
+    "expected_files": ["src/flask/app.py"],
+    "expected_symbols": ["Flask", "make_response"],
+    "expected_fix_type": "bug_fix",
+    "difficulty": "medium",
+    "language": "python"
+  },
+  {
+    "repo_url": "https://github.com/expressjs/express",
+    "issue_id": "express-03",
+    "issue_text": "Router.use ignores path prefix when regex contains capturing groups",
+    "expected_files": ["lib/router/index.js"],
+    "expected_symbols": ["Router", "use"],
+    "expected_fix_type": "bug_fix",
+    "difficulty": "hard",
+    "language": "javascript"
+  },
+  {
+    "repo_url": "https://github.com/django/django",
+    "issue_id": "django-04",
+    "issue_text": "QuerySet.bulk_create fails when fields list contains primary keys and database is sqlite",
+    "expected_files": ["django/db/models/query.py"],
+    "expected_symbols": ["QuerySet", "bulk_create"],
+    "expected_fix_type": "bug_fix",
+    "difficulty": "hard",
+    "language": "python"
+  },
+  {
+    "repo_url": "https://github.com/requests/requests",
+    "issue_id": "req-05",
+    "issue_text": "Timeout is ignored in Session.send when adaptor uses custom session pooling",
+    "expected_files": ["requests/sessions.py", "requests/adapters.py"],
+    "expected_symbols": ["Session", "send"],
+    "expected_fix_type": "bug_fix",
+    "difficulty": "medium",
+    "language": "python"
+  },
+  {
+    "repo_url": "https://github.com/tiangolo/fastapi",
+    "issue_id": "fastapi-06",
+    "issue_text": "FastAPI does not parse mypy type hints correctly when using Union types in dependencies",
+    "expected_files": ["fastapi/dependencies/utils.py"],
+    "expected_symbols": ["get_dependant"],
+    "expected_fix_type": "typing",
+    "difficulty": "medium",
+    "language": "python"
+  },
+  {
+    "repo_url": "https://github.com/webpack/webpack",
+    "issue_id": "webpack-07",
+    "issue_text": "SyntaxError in bundle when configuration targets ES5 and uses object spread operator",
+    "expected_files": ["lib/config/target.js"],
+    "expected_symbols": ["TargetProperties"],
+    "expected_fix_type": "configuration",
+    "difficulty": "easy",
+    "language": "javascript"
+  },
+  {
+    "repo_url": "https://github.com/pallets/jinja",
+    "issue_id": "jinja-08",
+    "issue_text": "Jinja Environment.compile fails to parse multi-line comments with unescaped backslashes",
+    "expected_files": ["src/jinja2/environment.py", "src/jinja2/lexer.py"],
+    "expected_symbols": ["Environment", "compile", "Lexer"],
+    "expected_fix_type": "bug_fix",
+    "difficulty": "medium",
+    "language": "python"
+  },
+  {
+    "repo_url": "https://github.com/psf/black",
+    "issue_id": "black-09",
+    "issue_text": "Black formatting changes import comments block formatting incorrectly in Python 3.10 match syntax",
+    "expected_files": ["src/black/formatting.py"],
+    "expected_symbols": ["format_str"],
+    "expected_fix_type": "refactor",
+    "difficulty": "medium",
+    "language": "python"
+  },
+  {
+    "repo_url": "https://github.com/pytest-dev/pytest",
+    "issue_id": "pytest-10",
+    "issue_text": "AssertionError in mock validation when pytest fixture is invoked with keyword arguments",
+    "expected_files": ["src/_pytest/fixtures.py"],
+    "expected_symbols": ["FixtureDef", "execute"],
+    "expected_fix_type": "bug_fix",
+    "difficulty": "medium",
+    "language": "python"
+  },
+  {
+    "repo_url": "https://github.com/tiangolo/fastapi",
+    "issue_id": "fastapi-11",
+    "issue_text": "Feature request: Add support for custom JSON response headers in dependency injection routing",
+    "expected_files": ["fastapi/routing.py"],
+    "expected_symbols": ["APIRoute"],
+    "expected_fix_type": "feature",
+    "difficulty": "hard",
+    "language": "python"
+  },
+  {
+    "repo_url": "https://github.com/encode/starlette",
+    "issue_id": "starlette-12",
+    "issue_text": "Memory leak in Routing system under heavy concurrency because of route cache exhaustion",
+    "expected_files": ["starlette/routing.py"],
+    "expected_symbols": ["Router", "resolve_scope"],
+    "expected_fix_type": "performance",
+    "difficulty": "medium",
+    "language": "python"
+  },
+  {
+    "repo_url": "https://github.com/requests/requests",
+    "issue_id": "req-13",
+    "issue_text": "CookieJar does not persist cookies with port attributes in Session requests",
+    "expected_files": ["requests/cookies.py"],
+    "expected_symbols": ["cookiejar_from_dict"],
+    "expected_fix_type": "bug_fix",
+    "difficulty": "easy",
+    "language": "python"
+  },
+  {
+    "repo_url": "https://github.com/django/django",
+    "issue_id": "django-14",
+    "issue_text": "Broken test suite: test_bulk_create fails on postgres backend",
+    "expected_files": ["tests/model_regress/tests.py"],
+    "expected_symbols": ["BulkCreateTests"],
+    "expected_fix_type": "testing",
+    "difficulty": "easy",
+    "language": "python"
+  },
+  {
+    "repo_url": "https://github.com/pallets/click",
+    "issue_id": "click-15",
+    "issue_text": "Click option validation error displays unescaped formatting when password option fails",
+    "expected_files": ["src/click/types.py"],
+    "expected_symbols": ["ParamType", "fail"],
+    "expected_fix_type": "bug_fix",
+    "difficulty": "easy",
+    "language": "python"
+  }
+]

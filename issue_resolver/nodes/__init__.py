@@ -13,6 +13,7 @@ from issue_resolver.nodes.issue_classifier import issue_classifier_node
 from issue_resolver.nodes.verification_type_classifier import verification_type_classifier_node
 from issue_resolver.nodes.repo_intelligence_node import repo_intelligence_node
 from issue_resolver.nodes.repo_analyst import repo_analyst_node
+from issue_resolver.nodes.localizer import localizer_node
 from issue_resolver.nodes.context_curator import context_curator_node
 from issue_resolver.nodes.candidate_generator import candidate_generator_node
 from issue_resolver.nodes.candidate_evaluator import candidate_evaluator_node
@@ -35,6 +36,7 @@ __all__ = [
     "verification_type_classifier_node",
     "repo_intelligence_node",
     "repo_analyst_node",
+    "localizer_node",
     "context_curator_node",
     "candidate_generator_node",
     "candidate_evaluator_node",
@@ -43,4 +45,5 @@ __all__ = [
     "self_critique_node",
     "debugger_node",
 ]
+
 

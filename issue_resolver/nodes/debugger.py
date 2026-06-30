@@ -1,13 +1,14 @@
 """Debugger Node — performs root cause analysis on verification failures.
 
-Runs when checks fail, inspects traces and knowledge graph calls, and enriches
-context to instruct the next coding attempts.
+Runs when checks fail, inspects traces and knowledge graph calls deterministically,
+parses errors, and enriches context to instruct the next coding attempts.
 """
 
 from __future__ import annotations
 
 import json
 import re
+from typing import Any
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from issue_resolver.state import AgentState
@@ -19,7 +20,8 @@ import issue_resolver.runtime_context as runtime_context
 
 # Register prompt template on import
 _DEFAULT_PROMPT = """\
-You are an expert Debugger. You are given a repository issue description, a proposed patch that failed verification, and the compiler/lint/test execution error messages.
+You are an expert Debugger. You are given a repository issue description, a proposed patch that failed verification, the compilation/lint/test execution error messages, and a structured diagnostics report derived from the repository graph and LSP.
+
 Your job is to analyze the root cause of the failure and output a bug diagnostics report.
 
 You must output a single JSON block wrapped in a ```json markdown block:
@@ -33,33 +35,119 @@ You must output a single JSON block wrapped in a ```json markdown block:
 get_prompt_registry().register("debugger", "1.0", _DEFAULT_PROMPT)
 
 
+def _parse_errors(errors_text: str) -> list[dict[str, Any]]:
+    """Parse traceback or compiler error lines to extract files, lines, and functions."""
+    matches = []
+    
+    # Python traceback pattern: File "path/to/file.py", line 123, in func_name
+    tb_pattern = re.compile(
+        r'File\s+"([^"]+\.(?:py|js|ts|go|rs|java|cpp|c|h|jsx|tsx|vue|rb))",\s+line\s+(\d+)(?:,\s+in\s+(\w+))?',
+        re.IGNORECASE
+    )
+    for m in tb_pattern.finditer(errors_text):
+        matches.append({
+            "file": m.group(1).replace("\\", "/"),
+            "line": int(m.group(2)),
+            "function": m.group(3) or ""
+        })
+        
+    # Compiler / Linter warning format: filename.py:123: or filename.py:123:45:
+    compile_pattern = re.compile(
+        r'(?:^|\n)([^:\s\n]+\.(?:py|js|ts|go|rs|java|cpp|c|h|jsx|tsx|vue|rb)):(\d+)(?::(\d+))?:?',
+        re.IGNORECASE
+    )
+    for m in compile_pattern.finditer(errors_text):
+        file_path = m.group(1).replace("\\", "/")
+        line_num = int(m.group(2))
+        # Avoid duplicates
+        if not any(match["file"] == file_path and match["line"] == line_num for match in matches):
+            matches.append({
+                "file": file_path,
+                "line": line_num,
+                "function": ""
+            })
+            
+    # Generic exception message extraction: e.g. "TypeError: ..."
+    exception_pattern = re.compile(r'(\b\w+(?:Error|Exception|Warning|Fault)\b:.*)', re.IGNORECASE)
+    msg_match = exception_pattern.search(errors_text)
+    if msg_match:
+        for match in matches:
+            match["exception_message"] = msg_match.group(1).strip()
+            
+    return matches
+
+
 def debugger_node(state: AgentState) -> dict:
-    """Diagnose build/test failure and provide strategy adjustments."""
+    """Diagnose build/test failure using deterministic parsing, graph lookups, and LLM reasoning."""
     print("[Debugger] Diagnosing validation failure...")
     issue = state.get("issue", "")
     proposed_fix = state.get("proposed_fix", "")
     errors = state.get("errors", "")
-    prompt = get_prompt_registry().get("debugger")
-
+    
+    # 1. Parse errors deterministically
+    parsed_errors = _parse_errors(errors)
+    
     graph = runtime_context.get_knowledge_graph()
+    lsp_bridge = runtime_context.get_lsp_bridge()
+    lsp_available = lsp_bridge is not None and lsp_bridge.is_available
 
-    # Query knowledge graph for symbols related to error line numbers or trace
-    graph_context = ""
-    if graph:
-        # Check error lines for function calls
-        error_lines = state.get("error_line_numbers", "")
-        m = re.findall(r"\d+", error_lines)
-        related_symbols = []
-        for line in m:
+    # 2. Query knowledge graph for symbols related to parsed error locations
+    graph_context_parts = []
+    
+    if graph and parsed_errors:
+        for match in parsed_errors:
+            file_path = match["file"]
+            line_num = match["line"]
+            norm_path = file_path.replace("\\", "/").lstrip("./")
+            
+            # Find function/class covering this line in the graph
+            matched_sym = None
             for fn in graph.functions.values():
-                if fn.line_number <= int(line) <= fn.end_line:
-                    related_symbols.append(fn.qualified_name)
-                    # Query callers
-                    callers = graph.get_callers(fn.name)
-                    related_symbols.extend(callers[:3])
+                fn_norm_path = fn.file_path.replace("\\", "/").lstrip("./")
+                if fn_norm_path == norm_path or norm_path.endswith(fn_norm_path):
+                    if fn.line_number <= line_num <= fn.end_line:
+                        matched_sym = fn
+                        match["function"] = fn.name
+                        break
+            
+            if matched_sym:
+                symbol_name = matched_sym.name
+                callers = graph.find_callers_structured(symbol_name)
+                tests = graph.get_tests_for(matched_sym.file_path)
+                
+                info = (
+                    f"- Error at `{norm_path}` line {line_num} in function `{symbol_name}`.\n"
+                    f"  - Callers: {', '.join(c['name'] for c in callers[:3]) or 'none'}\n"
+                    f"  - Tests for file: {', '.join(tests[:2]) or 'none'}"
+                )
+                
+                # Fetch LSP references if available
+                if lsp_available:
+                    try:
+                        from issue_resolver.intelligence.lsp_tools import lsp_find_references
+                        refs = lsp_find_references(symbol_name, matched_sym.file_path, matched_sym.line_number)
+                        if refs:
+                            info += f"\n  - LSP References: {', '.join(f'{r.get(chr(102), chr(105))}:{r.get(chr(108), 0)}' for r in refs[:3])}"
+                    except Exception:
+                        pass
+                
+                graph_context_parts.append(info)
+            else:
+                graph_context_parts.append(f"- Error at `{norm_path}` line {line_num} (no enclosing symbol found in graph).")
 
-        if related_symbols:
-            graph_context = f"Knowledge Graph Proximity:\n- Related symbols: {', '.join(set(related_symbols))}"
+    # 3. Compute blast radius
+    blast_radius = []
+    if graph:
+        structured_plan = state.get("structured_plan", {})
+        files_to_edit = structured_plan.get("files_to_edit", [])
+        if files_to_edit:
+            blast_radius = graph.get_affected_modules(files_to_edit)
+
+    graph_context = ""
+    if graph_context_parts:
+        graph_context += "### Repository Proximity Context:\n" + "\n".join(graph_context_parts)
+    if blast_radius:
+        graph_context += f"\n\n### Transitive Blast Radius of proposed files:\n- {', '.join(blast_radius[:10])}"
 
     debug_input = f"""Issue Description:
 {issue}
@@ -73,6 +161,7 @@ Verification Errors:
 {graph_context}
 """
 
+    prompt = get_prompt_registry().get("debugger")
     messages = [
         SystemMessage(content=prompt),
         HumanMessage(content=debug_input),
@@ -106,7 +195,11 @@ Verification Errors:
             "debugging_completed",
             "Debugger",
             "Completed root cause diagnosis",
-            details=diagnostics,
+            details={
+                "parsed_errors": parsed_errors,
+                "blast_radius": blast_radius,
+                "diagnostics": diagnostics,
+            },
         )
 
     # Append recommendations to plan

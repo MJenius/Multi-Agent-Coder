@@ -383,6 +383,179 @@ class RepoKnowledgeGraph:
         ))
         return results[:limit]
 
+    # ----- IDE-like operations -----
+
+    def find_definition(self, symbol: str) -> dict[str, Any] | None:
+        """Find where a symbol is defined.
+
+        Returns a dict with ``file``, ``line``, ``end_line``, ``kind``,
+        ``parent_class``, ``parameters``, ``bases``, and ``docstring``
+        — or ``None`` if the symbol is not found.
+        """
+        cls = self.get_class(symbol)
+        if cls:
+            return {
+                "file": cls.file_path, "line": cls.line_number,
+                "end_line": cls.end_line, "kind": "class",
+                "parent_class": "", "parameters": [],
+                "bases": cls.bases, "methods": cls.methods,
+                "attributes": cls.attributes,
+                "docstring": cls.docstring,
+            }
+        fn = self.get_function(symbol)
+        if fn:
+            return {
+                "file": fn.file_path, "line": fn.line_number,
+                "end_line": fn.end_line,
+                "kind": "method" if fn.is_method else "function",
+                "parent_class": fn.parent_class,
+                "parameters": fn.parameters,
+                "bases": [], "methods": [], "attributes": [],
+                "docstring": fn.docstring,
+            }
+        return None
+
+    def find_references(self, symbol: str) -> list[dict[str, Any]]:
+        """Find all locations where *symbol* is used.
+
+        Combines callers, importers, and subclass relationships to
+        build a comprehensive reference list.
+        """
+        refs: list[dict[str, Any]] = []
+
+        # Callers
+        for caller_qn in self.get_callers(symbol):
+            fn = self.functions.get(caller_qn)
+            if fn:
+                refs.append({
+                    "file": fn.file_path, "line": fn.line_number,
+                    "symbol": fn.name, "kind": "caller",
+                    "parent_class": fn.parent_class,
+                })
+            else:
+                # caller_qn may be unresolved — record what we know
+                parts = caller_qn.rsplit("::", 1)
+                refs.append({
+                    "file": parts[0] if len(parts) > 1 else "",
+                    "line": 0, "symbol": parts[-1],
+                    "kind": "caller", "parent_class": "",
+                })
+
+        # Modules that import this symbol
+        defn = self.find_definition(symbol)
+        if defn:
+            for edge in self.import_edges:
+                if symbol in edge.symbols:
+                    mod = self.get_module(edge.source)
+                    refs.append({
+                        "file": edge.source, "line": 0,
+                        "symbol": symbol, "kind": "import",
+                        "parent_class": "",
+                    })
+
+        # Subclass references (inheritance edges where this symbol is a parent)
+        for edge in self.inheritance_edges:
+            parent_simple = edge.parent.rsplit("::", 1)[-1]
+            if parent_simple == symbol or edge.parent == symbol:
+                child_simple = edge.child.rsplit("::", 1)[-1]
+                child_cls = self.get_class(child_simple)
+                if child_cls:
+                    refs.append({
+                        "file": child_cls.file_path,
+                        "line": child_cls.line_number,
+                        "symbol": child_cls.name,
+                        "kind": "subclass",
+                        "parent_class": "",
+                    })
+
+        return refs
+
+    def find_implementations(self, class_name: str) -> list[ClassNode]:
+        """Find all classes that directly extend *class_name*."""
+        results: list[ClassNode] = []
+        for edge in self.inheritance_edges:
+            parent_simple = edge.parent.rsplit("::", 1)[-1]
+            if parent_simple == class_name or edge.parent == class_name:
+                child_simple = edge.child.rsplit("::", 1)[-1]
+                child_cls = self.get_class(child_simple)
+                if child_cls and child_cls not in results:
+                    results.append(child_cls)
+        return results
+
+    def find_callers_structured(self, symbol: str) -> list[dict[str, Any]]:
+        """Return callers of *symbol* with file and line context."""
+        results: list[dict[str, Any]] = []
+        for caller_qn in self.get_callers(symbol):
+            fn = self.functions.get(caller_qn)
+            if fn:
+                results.append({
+                    "qualified_name": caller_qn,
+                    "name": fn.name,
+                    "file": fn.file_path,
+                    "line": fn.line_number,
+                    "end_line": fn.end_line,
+                    "parent_class": fn.parent_class,
+                })
+            else:
+                parts = caller_qn.rsplit("::", 1)
+                results.append({
+                    "qualified_name": caller_qn,
+                    "name": parts[-1],
+                    "file": parts[0] if len(parts) > 1 else "",
+                    "line": 0, "end_line": 0, "parent_class": "",
+                })
+        return results
+
+    def find_callees_structured(self, symbol: str) -> list[dict[str, Any]]:
+        """Return symbols that *symbol* calls, with file and line context."""
+        results: list[dict[str, Any]] = []
+        for callee_name in self.get_callees(symbol):
+            fn = self.get_function(callee_name)
+            if fn:
+                results.append({
+                    "qualified_name": fn.qualified_name,
+                    "name": fn.name,
+                    "file": fn.file_path,
+                    "line": fn.line_number,
+                    "end_line": fn.end_line,
+                    "parent_class": fn.parent_class,
+                })
+            else:
+                results.append({
+                    "qualified_name": callee_name,
+                    "name": callee_name,
+                    "file": "", "line": 0, "end_line": 0,
+                    "parent_class": "",
+                })
+        return results
+
+    def get_symbol_context(self, symbol: str) -> dict[str, Any]:
+        """Assemble complete context for a symbol.
+
+        This is the primary entry point for the Localizer.  Returns
+        definition, callers, callees, related tests, imports, and
+        inheritance chain — everything needed to understand and modify
+        the symbol.
+        """
+        definition = self.find_definition(symbol)
+        file_path = definition["file"] if definition else ""
+
+        return {
+            "symbol": symbol,
+            "definition": definition,
+            "callers": self.find_callers_structured(symbol),
+            "callees": self.find_callees_structured(symbol),
+            "references": self.find_references(symbol),
+            "tests": self.get_tests_for(file_path) if file_path else [],
+            "imports": self.get_dependencies(file_path) if file_path else [],
+            "dependents": self.get_dependents(file_path) if file_path else [],
+            "inheritance": self.get_inheritance_chain(symbol),
+            "implementations": [
+                {"name": c.name, "file": c.file_path, "line": c.line_number}
+                for c in self.find_implementations(symbol)
+            ],
+        }
+
     # ----- serialisation -----
 
     def to_summary_dict(self) -> dict[str, Any]:
