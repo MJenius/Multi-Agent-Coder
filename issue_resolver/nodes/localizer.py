@@ -103,101 +103,118 @@ class LocalizationResult:
 # ---------------------------------------------------------------------------
 
 
-def _extract_entities(issue_text: str) -> list[str]:
-    """Extract likely code entities from the issue text using regex.
-
-    Captures:
-      - Backtick-quoted identifiers: `calculate_total`
-      - Code block identifiers: function/class names in ```python blocks
-      - File paths: src/utils.py, foo/bar.js
-      - camelCase, snake_case, PascalCase tokens
-      - Dotted names: module.Class.method
-      - Error class names: TypeError, ValueError
-      - String literals from tracebacks
-    """
-    entities: list[str] = []
+def _extract_entities_with_sources(issue_text: str) -> dict[str, set[str]]:
+    """Extract likely code entities from the issue text, categorised by source/signal type."""
+    entity_sources: dict[str, set[str]] = {}
 
     # 1. Backtick-quoted identifiers (highest signal)
     backtick = re.findall(r"`([^`\n]{2,80})`", issue_text)
     for m in backtick:
-        # Strip function call parens: `foo()` → foo
         clean = m.split("(")[0].strip()
         if clean and not clean.startswith("http"):
-            entities.append(clean)
+            entity_sources.setdefault(clean, set()).add("backtick")
 
     # 2. Code blocks — extract function/class definitions
     code_blocks = re.findall(r"```(?:\w+)?\s*\n(.*?)\n```", issue_text, re.DOTALL)
     for block in code_blocks:
-        # Python: def foo(...), class Bar
-        entities.extend(re.findall(r"(?:def|class)\s+(\w+)", block))
-        # JS/TS: function foo, const foo = , export function foo
-        entities.extend(re.findall(r"(?:function|const|let|var|export)\s+(\w+)", block))
+        for val in re.findall(r"(?:def|class)\s+(\w+)", block):
+            entity_sources.setdefault(val, set()).add("code_block")
+        for val in re.findall(r"(?:function|const|let|var|export)\s+(\w+)", block):
+            entity_sources.setdefault(val, set()).add("code_block")
 
     # 3. File paths
-    entities.extend(re.findall(
+    file_paths = re.findall(
         r"([a-zA-Z_]\w*(?:/[a-zA-Z_]\w*)*\.(?:py|js|ts|go|rs|java|cpp|c|h|jsx|tsx|vue|rb))",
         issue_text,
-    ))
+    )
+    for path in file_paths:
+        entity_sources.setdefault(path, set()).add("file_path")
 
     # 4. PascalCase class names (e.g. TableTitle, HttpClient)
-    entities.extend(re.findall(r"\b([A-Z][a-z]+(?:[A-Z][a-z]+)+)\b", issue_text))
+    pascal = re.findall(r"\b([A-Z][a-z]+(?:[A-Z][a-z]+)+)\b", issue_text)
+    for val in pascal:
+        entity_sources.setdefault(val, set()).add("pascal")
 
     # 5. snake_case identifiers
-    entities.extend(re.findall(r"\b([a-z][a-z0-9]*_[a-z0-9_]+)\b", issue_text))
+    snake = re.findall(r"\b([a-z][a-z0-9]*_[a-z0-9_]+)\b", issue_text)
+    for val in snake:
+        entity_sources.setdefault(val, set()).add("snake")
 
     # 6. camelCase identifiers
-    entities.extend(re.findall(r"\b([a-z]+[A-Z][a-zA-Z0-9]*)\b", issue_text))
+    camel = re.findall(r"\b([a-z]+[A-Z][a-zA-Z0-9]*)\b", issue_text)
+    for val in camel:
+        entity_sources.setdefault(val, set()).add("camel")
 
     # 7. Dotted names (module.Class.method)
-    entities.extend(re.findall(
+    dotted = re.findall(
         r"\b([a-zA-Z_]\w+\.[a-zA-Z_]\w+(?:\.[a-zA-Z_]\w+)*)\b",
         issue_text,
-    ))
+    )
+    for val in dotted:
+        entity_sources.setdefault(val, set()).add("dotted")
 
     # 8. Error class names
-    entities.extend(re.findall(r"\b([A-Z][a-z]+(?:Error|Exception|Warning|Fault))\b", issue_text))
+    errors = re.findall(r"\b([A-Z][a-z]+(?:Error|Exception|Warning|Fault))\b", issue_text)
+    for val in errors:
+        entity_sources.setdefault(val, set()).add("error_class")
 
     # 9. Traceback file references: File "foo/bar.py", line 42
-    entities.extend(re.findall(r'File "([^"]+)"', issue_text))
+    trace_files = re.findall(r'File "([^"]+)"', issue_text)
+    for path in trace_files:
+        entity_sources.setdefault(path, set()).add("traceback_file")
 
     # 10. Traceback function names: in calculate_total
-    entities.extend(re.findall(r"^\s+in (\w+)\s*$", issue_text, re.MULTILINE))
+    trace_funcs = re.findall(r"^\s+in (\w+)\s*$", issue_text, re.MULTILINE)
+    for func in trace_funcs:
+        entity_sources.setdefault(func, set()).add("traceback_func")
 
-    # Deduplicate preserving order, filter noise
-    seen: set[str] = set()
-    unique: list[str] = []
+    # Deduplicate and filter noise
+    filtered_sources: dict[str, set[str]] = {}
     noise = {"the", "this", "that", "with", "from", "import", "and", "for", "not", "but",
              "def", "class", "return", "none", "true", "false", "self", "cls"}
-    for ent in entities:
+    for ent, sources in entity_sources.items():
         lower = ent.lower()
-        if lower not in seen and len(ent) >= 2 and lower not in noise:
-            seen.add(lower)
-            unique.append(ent)
-    return unique[:50]
+        if len(ent) >= 2 and lower not in noise:
+            filtered_sources[ent] = sources
+
+    # Prioritize entities: traceback > backtick > file_path > error_class > others
+    def entity_priority(item):
+        ent_str, sources_set = item
+        priority = 0
+        if "traceback_file" in sources_set:
+            priority += 100
+        if "traceback_func" in sources_set:
+            priority += 80
+        if "backtick" in sources_set:
+            priority += 60
+        if "file_path" in sources_set:
+            priority += 50
+        if "error_class" in sources_set:
+            priority += 40
+        if "code_block" in sources_set:
+            priority += 30
+        if "dotted" in sources_set:
+            priority += 20
+        return priority
+
+    sorted_entities = sorted(filtered_sources.items(), key=entity_priority, reverse=True)
+    return dict(sorted_entities[:50])
 
 
-# ---------------------------------------------------------------------------
-# Localization pipeline
-# ---------------------------------------------------------------------------
+def _extract_entities(issue_text: str) -> list[str]:
+    """Helper for backward compatibility returning list of extracted entities."""
+    return list(_extract_entities_with_sources(issue_text).keys())
 
 
-def _localize(issue_text: str) -> LocalizationResult:
-    """Run the full deterministic localization pipeline."""
-    graph = runtime_context.get_knowledge_graph()
-    lsp_bridge = runtime_context.get_lsp_bridge()
-    lsp_available = lsp_bridge is not None and lsp_bridge.is_available
-
-    # Step 1: Extract entities
-    entities = _extract_entities(issue_text)
-    if not entities:
-        return LocalizationResult(
-            primary_files=[], symbols=[], references=[], test_files=[],
-            dependency_neighbors=[], confidence=0.0, entities_extracted=[],
-            graph_hits=0, graph_misses=0, missed_entities=[],
-            lsp_available=lsp_available, needs_researcher_fallback=True,
-        )
-
-    # Step 2: Graph lookup
+def _run_localization_pass(
+    entities: list[str],
+    entity_sources: dict[str, set[str]],
+    graph,
+    lsp_bridge,
+    lsp_available: bool,
+    repo_path: str,
+    expand: bool = False
+) -> tuple[dict[str, float], dict[str, list[str]], list[LocatedSymbol], list[str], set[str], set[str], int, int, list[str]]:
     symbols: list[LocatedSymbol] = []
     file_scores: dict[str, float] = {}
     file_reasons: dict[str, list[str]] = {}
@@ -208,17 +225,23 @@ def _localize(issue_text: str) -> LocalizationResult:
     test_files: set[str] = set()
     dependency_neighbors: set[str] = set()
 
-    if graph is None:
-        return LocalizationResult(
-            primary_files=[], symbols=[], references=[], test_files=[],
-            dependency_neighbors=[], confidence=0.0,
-            entities_extracted=entities,
-            graph_hits=0, graph_misses=len(entities), missed_entities=entities,
-            lsp_available=lsp_available, needs_researcher_fallback=True,
-        )
+    def get_multiplier(entity: str) -> float:
+        sources = entity_sources.get(entity, set())
+        if "traceback_file" in sources or "traceback_func" in sources:
+            return 2.5
+        if "backtick" in sources:
+            return 2.0
+        if "file_path" in sources:
+            return 1.8
+        if "code_block" in sources:
+            return 1.5
+        if "error_class" in sources:
+            return 1.3
+        return 1.0
 
     for entity in entities:
         found = False
+        mult = get_multiplier(entity)
 
         # Try as dotted name: split module.Class.method
         parts = entity.split(".")
@@ -226,7 +249,7 @@ def _localize(issue_text: str) -> LocalizationResult:
             if len(part) < 2:
                 continue
 
-            # Step 2a: Class lookup
+            # Class/method definition lookup
             ctx = graph.get_symbol_context(part)
             defn = ctx["definition"]
             if defn:
@@ -244,34 +267,34 @@ def _localize(issue_text: str) -> LocalizationResult:
 
                 # Score the file
                 fp = defn["file"]
-                file_scores[fp] = file_scores.get(fp, 0.0) + 0.4
+                file_scores[fp] = file_scores.get(fp, 0.0) + (0.6 * mult)
                 file_reasons.setdefault(fp, []).append(f"defines {part}")
 
                 # Step 3: Callers and callees
                 for caller in ctx["callers"]:
                     caller_file = caller.get("file", "")
                     if caller_file:
-                        file_scores[caller_file] = file_scores.get(caller_file, 0.0) + 0.15
+                        file_scores[caller_file] = file_scores.get(caller_file, 0.0) + (0.2 * mult)
                         file_reasons.setdefault(caller_file, []).append(f"calls {part}")
                         all_references.append(f"{caller['name']} → {part}")
 
                 for callee in ctx["callees"]:
                     callee_file = callee.get("file", "")
                     if callee_file:
-                        file_scores[callee_file] = file_scores.get(callee_file, 0.0) + 0.1
+                        file_scores[callee_file] = file_scores.get(callee_file, 0.0) + (0.12 * mult)
                         file_reasons.setdefault(callee_file, []).append(f"called by {part}")
 
                 # Step 4: Inheritance chain
                 for impl in ctx.get("implementations", []):
                     impl_file = impl.get("file", "")
                     if impl_file:
-                        file_scores[impl_file] = file_scores.get(impl_file, 0.0) + 0.15
+                        file_scores[impl_file] = file_scores.get(impl_file, 0.0) + (0.2 * mult)
                         file_reasons.setdefault(impl_file, []).append(f"implements {part}")
 
                 # Step 5: Tests
                 for test_path in ctx["tests"]:
                     test_files.add(test_path)
-                    file_scores[test_path] = file_scores.get(test_path, 0.0) + 0.05
+                    file_scores[test_path] = file_scores.get(test_path, 0.0) + (0.08 * mult)
                     file_reasons.setdefault(test_path, []).append(f"tests {part}")
 
                 # Step 6: Dependencies
@@ -281,18 +304,19 @@ def _localize(issue_text: str) -> LocalizationResult:
                     dependency_neighbors.add(dep)
 
         # Try as file path
-        if not found and "/" in entity or entity.endswith((".py", ".js", ".ts")):
+        if not found and ("/" in entity or entity.endswith((".py", ".js", ".ts"))):
             normalised = entity.replace("\\", "/").lstrip("./")
             if normalised in (graph.modules or {}):
                 found = True
-                file_scores[normalised] = file_scores.get(normalised, 0.0) + 0.5
+                file_scores[normalised] = file_scores.get(normalised, 0.0) + (0.8 * mult)
                 file_reasons.setdefault(normalised, []).append("mentioned as file path")
 
         # Fuzzy symbol search as last resort
         if not found:
-            fuzzy_results = graph.query_symbols(entity, limit=3)
+            limit = 8 if expand else 3
+            fuzzy_results = graph.query_symbols(entity, limit=limit)
             for r in fuzzy_results:
-                if r["name"].lower() == entity.lower():
+                if r["name"].lower() == entity.lower() or (expand and entity.lower() in r["name"].lower()):
                     found = True
                     symbols.append(LocatedSymbol(
                         name=r["name"],
@@ -305,11 +329,51 @@ def _localize(issue_text: str) -> LocalizationResult:
                         source="graph_fuzzy",
                     ))
                     fp = r["file"]
-                    file_scores[fp] = file_scores.get(fp, 0.0) + 0.25
+                    file_scores[fp] = file_scores.get(fp, 0.0) + (0.4 * mult)
                     file_reasons.setdefault(fp, []).append(f"fuzzy match for {entity}")
+
+                    # Expanded fuzzy traversal
+                    if expand:
+                        try:
+                            ctx = graph.get_symbol_context(r["name"])
+                            for caller in ctx["callers"]:
+                                caller_file = caller.get("file", "")
+                                if caller_file:
+                                    file_scores[caller_file] = file_scores.get(caller_file, 0.0) + (0.1 * mult)
+                                    file_reasons.setdefault(caller_file, []).append(f"calls fuzzy {r['name']}")
+                            for callee in ctx["callees"]:
+                                callee_file = callee.get("file", "")
+                                if callee_file:
+                                    file_scores[callee_file] = file_scores.get(callee_file, 0.0) + (0.05 * mult)
+                            for test_path in ctx["tests"]:
+                                test_files.add(test_path)
+                        except Exception:
+                            pass
                     break
 
-        # Step 2b: LSP-enhanced lookup (when available and graph found a location)
+        # Fallback localization via smart_search (ripgrep) if expand is True
+        if not found and expand:
+            from issue_resolver.utils.ripgrep_search import smart_search
+            if len(entity) >= 3:
+                rg_results = smart_search(entity, repo_path)
+                if rg_results:
+                    found = True
+                    for match in rg_results:
+                        matched_file = match["file"].replace("\\", "/").replace(repo_path.replace("\\", "/").rstrip("/") + "/", "").lstrip("./")
+                        file_scores[matched_file] = file_scores.get(matched_file, 0.0) + (0.35 * mult)
+                        file_reasons.setdefault(matched_file, []).append(f"ripgrep fallback match for {entity}")
+                        symbols.append(LocatedSymbol(
+                            name=entity,
+                            kind="function" if "def " in match["content"] or "function" in match["content"] else "generic",
+                            file_path=matched_file,
+                            line_number=match["line"],
+                            end_line=0,
+                            parent_class="",
+                            confidence=0.6,
+                            source="ripgrep",
+                        ))
+
+        # Step 2b: LSP-enhanced lookup
         if found and lsp_available and symbols:
             last_sym = symbols[-1]
             try:
@@ -321,7 +385,7 @@ def _localize(issue_text: str) -> LocalizationResult:
                 for ref in lsp_refs:
                     ref_file = ref.get("file", "")
                     if ref_file and ref_file not in file_scores:
-                        file_scores[ref_file] = file_scores.get(ref_file, 0.0) + 0.1
+                        file_scores[ref_file] = file_scores.get(ref_file, 0.0) + (0.12 * mult)
                         file_reasons.setdefault(ref_file, []).append(f"LSP reference to {last_sym.name}")
             except Exception:
                 pass
@@ -332,13 +396,81 @@ def _localize(issue_text: str) -> LocalizationResult:
             graph_misses += 1
             missed_entities.append(entity)
 
-    # Step 7: Score and rank files
+    return file_scores, file_reasons, symbols, all_references, test_files, dependency_neighbors, graph_hits, graph_misses, missed_entities
+
+
+def _localize(issue_text: str) -> LocalizationResult:
+    """Run the full deterministic localization pipeline."""
+    graph = runtime_context.get_knowledge_graph()
+    lsp_bridge = runtime_context.get_lsp_bridge()
+    lsp_available = lsp_bridge is not None and lsp_bridge.is_available
+    
+    # Resolve repo path centrally
+    env_config = runtime_context.get_environment_config() or {}
+    repo_path = env_config.get("repo_root", ".")
+
+    # Step 1: Extract entities
+    entity_sources = _extract_entities_with_sources(issue_text)
+    entities = list(entity_sources.keys())
+    if not entities:
+        return LocalizationResult(
+            primary_files=[], symbols=[], references=[], test_files=[],
+            dependency_neighbors=[], confidence=0.0, entities_extracted=[],
+            graph_hits=0, graph_misses=0, missed_entities=[],
+            lsp_available=lsp_available, needs_researcher_fallback=True,
+        )
+
+    if graph is None:
+        return LocalizationResult(
+            primary_files=[], symbols=[], references=[], test_files=[],
+            dependency_neighbors=[], confidence=0.0,
+            entities_extracted=entities,
+            graph_hits=0, graph_misses=len(entities), missed_entities=entities,
+            lsp_available=lsp_available, needs_researcher_fallback=True,
+        )
+
+    # Pass 1: standard localization lookup
+    file_scores, file_reasons, symbols, all_references, test_files, dependency_neighbors, graph_hits, graph_misses, missed_entities = \
+        _run_localization_pass(entities, entity_sources, graph, lsp_bridge, lsp_available, repo_path, expand=False)
+
+    total_entities = max(len(entities), 1)
+    hit_rate = graph_hits / total_entities
+    
+    def compute_overall_confidence(hit_rate_val, symbols_list, file_scores_dict):
+        exact_hit_count = sum(1 for s in symbols_list if s.confidence >= 0.9)
+        traceback_hit_count = sum(1 for s in symbols_list if s.source in ("graph", "graph_fuzzy") and any("traceback" in src for src in entity_sources.get(s.name, [])))
+        backtick_hit_count = sum(1 for s in symbols_list if any("backtick" in src for src in entity_sources.get(s.name, [])))
+        file_path_hit_count = sum(1 for fp in file_scores_dict if any(fp.endswith(ent) or ent in fp for ent in entities if "file_path" in entity_sources.get(ent, [])))
+        
+        base_confidence = hit_rate_val * 0.4
+        if exact_hit_count > 0:
+            base_confidence += 0.25
+        if traceback_hit_count > 0:
+            base_confidence += 0.25
+        if backtick_hit_count > 0:
+            base_confidence += 0.15
+        if file_path_hit_count > 0:
+            base_confidence += 0.15
+        return min(1.0, max(0.0, base_confidence))
+
+    overall_confidence = compute_overall_confidence(hit_rate, symbols, file_scores)
+
+    # Adaptive expansion pass if confidence below 0.70
+    if overall_confidence < 0.70:
+        print(f"[Localizer] Confidence {overall_confidence:.2f} < 0.70. Running expanded pass with graph traversal expansion and fallback localization...")
+        file_scores, file_reasons, symbols, all_references, test_files, dependency_neighbors, graph_hits, graph_misses, missed_entities = \
+            _run_localization_pass(entities, entity_sources, graph, lsp_bridge, lsp_available, repo_path, expand=True)
+            
+        hit_rate = graph_hits / total_entities
+        overall_confidence = compute_overall_confidence(hit_rate, symbols, file_scores)
+        print(f"[Localizer] Expanded pass complete. Confidence updated to: {overall_confidence:.2f}")
+
     if not file_scores:
         return LocalizationResult(
             primary_files=[], symbols=symbols, references=all_references,
             test_files=sorted(test_files),
             dependency_neighbors=sorted(dependency_neighbors),
-            confidence=0.0, entities_extracted=entities,
+            confidence=overall_confidence, entities_extracted=entities,
             graph_hits=graph_hits, graph_misses=graph_misses,
             missed_entities=missed_entities,
             lsp_available=lsp_available, needs_researcher_fallback=True,
@@ -351,6 +483,7 @@ def _localize(issue_text: str) -> LocalizationResult:
         for p, s in file_scores.items()
     }
 
+    from issue_resolver.core.interfaces import Confidence
     primary_files = [
         ScoredFile(
             path=path,
@@ -361,16 +494,9 @@ def _localize(issue_text: str) -> LocalizationResult:
         for path, score in sorted(normalised_scores.items(), key=lambda x: x[1], reverse=True)
     ]
 
-    # Step 8: Compute overall confidence
-    total_entities = max(len(entities), 1)
-    hit_rate = graph_hits / total_entities
-    max_file_score = primary_files[0].score if primary_files else 0.0
-    overall_confidence = (hit_rate * 0.6) + (max_file_score * 0.4)
-
-    # Step 9: Determine if researcher fallback is needed
+    # Needs fallback if overall confidence below 0.70
     needs_fallback = (
-        overall_confidence < 0.4
-        or (graph_misses / total_entities) > 0.4
+        overall_confidence < 0.70
         or len(primary_files) == 0
     )
 

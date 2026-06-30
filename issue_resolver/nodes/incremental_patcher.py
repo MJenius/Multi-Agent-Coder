@@ -100,11 +100,16 @@ def incremental_patcher_node(state: AgentState) -> dict:
 
                 if lint_failed:
                     print(f"[IncrementalPatcher] Block {idx + 1} caused compilation/lint failure. Reverting block.")
-                    # Revert file changes
+                    # Revert file changes by writing back original content
+                    with open(file_abs, "w", encoding="utf-8", newline="") as f:
+                        f.write(content)
                     if sandbox:
                         sandbox.exec_run(f"git checkout -- {file_rel}", workdir="/workspace")
                     else:
-                        subprocess.run(["git", "checkout", "--", file_abs], cwd=repo_path)
+                        try:
+                            subprocess.run(["git", "checkout", "--", file_abs], cwd=repo_path, capture_output=True)
+                        except Exception:
+                            pass
                     failed_blocks.append({
                         "index": idx,
                         "file": file_rel,

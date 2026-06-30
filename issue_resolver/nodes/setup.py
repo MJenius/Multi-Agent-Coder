@@ -136,6 +136,39 @@ def setup_node(state: AgentState) -> dict:
     issue_text = state.get("issue", "")
     issue_title = issue_text.splitlines()[0].strip() if issue_text else ""
 
+    # Verify verification environment is available (sandbox or local fallback)
+    from issue_resolver.tools.sandbox_tools import get_sandbox_container
+    import subprocess
+    import shutil
+    
+    sandbox_available = False
+    try:
+        sandbox = get_sandbox_container()
+        if sandbox is not None:
+            sandbox_available = True
+    except Exception:
+        pass
+        
+    local_available = False
+    if not sandbox_available:
+        print("[Setup] Sandbox container is NOT running. Checking for local verification fallback...")
+        if shutil.which("python") or shutil.which("python3") or shutil.which("pytest") or shutil.which("mypy") or shutil.which("ruff"):
+            local_available = True
+        else:
+            try:
+                subprocess.run(["python", "--version"], capture_output=True, timeout=2)
+                local_available = True
+            except Exception:
+                pass
+                
+        if not local_available:
+            raise RuntimeError(
+                "Verification Infrastructure Error: Neither Docker sandbox container is running, "
+                "nor are local verification tools (python, pytest, mypy, ruff) available in the system PATH. "
+                "At least one verification method must be available before starting resolution."
+            )
+        print("[Setup] Local verification tools are available. Using local verification fallback.")
+
     root = Path(repo_path).resolve()
     env_type, extra = _detect_environment(root)
     gitignore_patterns = _load_root_gitignore_patterns(root)

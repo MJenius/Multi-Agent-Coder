@@ -43,6 +43,92 @@ Output ONLY the category name from the list above. Do not output anything else.
 get_prompt_registry().register("issue_classifier", "1.0", _DEFAULT_PROMPT)
 
 
+def clean_issue_for_classification(issue_text: str) -> str:
+    """Strip GitHub issue templates, HTML comments, checklists, boilerplate, and links."""
+    if not issue_text:
+        return ""
+    
+    # 1. Remove HTML comments
+    text = re.sub(r'<!--[\s\S]*?-->', '', issue_text)
+    
+    # 2. Split into lines
+    lines = text.split('\n')
+    cleaned_lines = []
+    
+    # Common boilerplate sentences/phrases to remove
+    boilerplate_patterns = [
+        r'before (creating|opening|submitting) this issue',
+        r'please (make sure|ensure|read|check|confirm|fill|review)',
+        r'search existing issues',
+        r'latest version',
+        r'contribution guide',
+        r'code of conduct',
+        r'security policy',
+        r'tick the boxes',
+        r'replace this text',
+        r'delete this section',
+        r'fill out the template',
+    ]
+    
+    # 3. Process line by line
+    for line in lines:
+        # Strip checklist boxes (e.g. - [ ] or - [x])
+        if re.match(r'^\s*[-*+]\s*\[[ xX]\]', line):
+            # Strip the checkbox prefix
+            content = re.sub(r'^\s*[-*+]\s*\[[ xX]\]\s*', '', line)
+            # Check if the content is boilerplate
+            is_boilerplate = False
+            for pattern in boilerplate_patterns:
+                if re.search(pattern, content.lower()):
+                    is_boilerplate = True
+                    break
+            if not is_boilerplate and content.strip():
+                cleaned_lines.append(content)
+            continue
+        
+        # Skip header-only lines that are typical boilerplate headers
+        lower_line = line.strip().lower()
+        boilerplate_headers = [
+            "### checklist", "## checklist", "# checklist", "checklist:",
+            "### code of conduct", "## code of conduct", "code of conduct:",
+            "### prerequisites", "## prerequisites", "prerequisites:",
+            "### guidelines", "## guidelines", "guidelines:",
+        ]
+        if any(header == lower_line or lower_line.startswith(header) for header in boilerplate_headers):
+            continue
+            
+        # General boilerplate sentence check
+        is_boilerplate = False
+        for pattern in boilerplate_patterns:
+            if re.search(pattern, lower_line):
+                is_boilerplate = True
+                break
+        if is_boilerplate:
+            continue
+            
+        cleaned_lines.append(line)
+        
+    text = '\n'.join(cleaned_lines)
+    
+    # 4. Remove documentation and other links
+    def repl_markdown_link(match):
+        link_text = match.group(1)
+        url = match.group(2)
+        url_lower = url.lower()
+        text_lower = link_text.lower()
+        doc_indicators = ["doc", "wiki", "guide", "manual", "readme", "faq", "contributing", "github.com/"]
+        if any(ind in url_lower or ind in text_lower for ind in doc_indicators):
+            return ""
+        return link_text
+        
+    text = re.sub(r'\[([^\]]+)\]\((https?://[^\s)]+)\)', repl_markdown_link, text)
+    text = re.sub(r'https?://[^\s]+', '', text)
+    
+    # Strip duplicate empty lines
+    text = re.sub(r'\n\s*\n\s*\n+', '\n\n', text)
+    return text.strip()
+
+
 def _deterministic_classify(issue_text: str) -> tuple[str, dict[str, Any]]:
     """Determine category and compute suitability metadata using heuristics."""
     issue_lower = issue_text.lower()
@@ -204,9 +290,11 @@ def issue_classifier_node(state: AgentState) -> dict:
     """Classify the incoming issue category (deterministic with LLM fallback)."""
     print("[Classifier] Categorising issue...")
     issue = state.get("issue", "")
+    
+    cleaned_issue = clean_issue_for_classification(issue)
 
     # Run deterministic classification first
-    category, suitability = _deterministic_classify(issue)
+    category, suitability = _deterministic_classify(cleaned_issue)
     method = "deterministic"
 
     # Fall back to LLM if confidence is low
@@ -216,7 +304,7 @@ def issue_classifier_node(state: AgentState) -> dict:
 
         messages = [
             SystemMessage(content=prompt),
-            HumanMessage(content=f"Issue Description:\n{issue}"),
+            HumanMessage(content=f"Issue Description:\n{cleaned_issue}"),
         ]
 
         try:

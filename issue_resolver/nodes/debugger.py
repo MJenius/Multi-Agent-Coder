@@ -23,9 +23,11 @@ _DEFAULT_PROMPT = """\
 You are an expert Debugger. You are given a repository issue description, a proposed patch that failed verification, the compilation/lint/test execution error messages, and a structured diagnostics report derived from the repository graph and LSP.
 
 Your job is to analyze the root cause of the failure and output a bug diagnostics report.
+Analyze specifically why the patch failed: check if there was a SEARCH block mismatch (search block not found/matched), a compilation/syntax error, a linter violation, or a test failure.
 
 You must output a single JSON block wrapped in a ```json markdown block:
 {
+  "failure_type": "One of: search_mismatch, compilation_error, linter_error, test_failure, wrong_file, other",
   "root_cause": "Detailed explanation of why the proposed patch failed",
   "knowledge_graph_findings": "Related functions or classes that might be connected",
   "strategy_adjustments": "Specific adjustments recommended for the next coding attempt"
@@ -167,6 +169,8 @@ Verification Errors:
         HumanMessage(content=debug_input),
     ]
 
+    repo_path = state.get("repo_path", ".")
+
     try:
         resp, model_name = invoke_with_role_fallback(
             role="debugger",
@@ -182,10 +186,51 @@ Verification Errors:
     except Exception as exc:
         print(f"[Debugger] [ERROR] Diagnostics execution failed: {exc}")
         diagnostics = {
+            "failure_type": "other",
             "root_cause": f"Verification error details: {errors}",
             "knowledge_graph_findings": "None",
             "strategy_adjustments": "Retry the implementation step with additional verification checks.",
         }
+
+    # 4. Refresh/update file context with latest contents from disk
+    import os
+    from issue_resolver.tools.repo_tools import read_file
+    
+    updated_file_context = list(state.get("file_context", []))
+    files_to_refresh = set()
+    
+    # Refresh target files from plan
+    structured_plan = state.get("structured_plan", {})
+    for f in structured_plan.get("files_to_edit", []):
+        files_to_refresh.add(f.replace("\\", "/").lstrip("./"))
+        
+    # Refresh files with errors
+    for err in parsed_errors:
+        if "file" in err:
+            files_to_refresh.add(err["file"].replace("\\", "/").lstrip("./"))
+            
+    # Refresh files with search block mismatches
+    mismatched_files = re.findall(r"Block \d+ on (\S+) failed: Search block content not matched", errors)
+    for f in mismatched_files:
+        files_to_refresh.add(f.replace("\\", "/").lstrip("./"))
+        
+    for rel_path in files_to_refresh:
+        file_abs = os.path.abspath(os.path.join(repo_path, rel_path))
+        if os.path.exists(file_abs):
+            content = read_file.invoke({"file_path": file_abs})
+            if not content.startswith("Error"):
+                snippet_header = f"=== File: {rel_path} ==="
+                new_snippet = f"{snippet_header}\n{content}"
+                
+                # Update in context if already exists, else append
+                found = False
+                for idx, snip in enumerate(updated_file_context):
+                    if snip.startswith(snippet_header):
+                        updated_file_context[idx] = new_snippet
+                        found = True
+                        break
+                if not found:
+                    updated_file_context.append(new_snippet)
 
     # Record trace
     from issue_resolver.core.execution_trace import get_trace
@@ -205,18 +250,19 @@ Verification Errors:
     # Append recommendations to plan
     plan_adjusted = (
         f"{state.get('plan', '')}\n\n"
-        f"## Debugger Diagnostics:\n"
+        f"## Debugger Diagnostics ({diagnostics.get('failure_type', 'unknown')}):\n"
         f"- Root Cause: {diagnostics.get('root_cause')}\n"
         f"- Recommended Adjustments: {diagnostics.get('strategy_adjustments')}"
     )
 
-    print(f"[Debugger] Root cause diagnosed: {diagnostics.get('root_cause')[:200]}...")
+    print(f"[Debugger] Root cause diagnosed ({diagnostics.get('failure_type')}): {diagnostics.get('root_cause')[:200]}...")
 
     return {
         "plan": plan_adjusted,
+        "file_context": updated_file_context,
         "history": append_to_history(
             "Debugger",
             "Diagnose",
-            f"Diagnosed failure: {diagnostics.get('root_cause')[:150]}",
+            f"Diagnosed failure ({diagnostics.get('failure_type', 'unknown')}): {diagnostics.get('root_cause')[:150]}",
         ),
     }

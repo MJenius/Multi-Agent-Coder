@@ -241,29 +241,26 @@ def reviewer_node(state: AgentState) -> dict:
                             ),
                         }
 
-    # 2. Run sandbox verification pipeline
+    # 2. Run sandbox or local verification pipeline
     from issue_resolver.utils.verifier import VerificationPipeline
+    from issue_resolver.tools.sandbox_tools import get_sandbox_container
     verification_type = state.get("verification_type", "runtime tests")
     pipeline = VerificationPipeline(repo_path, verification_type=verification_type)
     
     # Run the verification steps on changed files
     print("[Reviewer] Applying and validating patch using the verification pipeline...")
     
+    sandbox = get_sandbox_container()
+    
     try:
-        # First, apply the proposed diff in the sandbox
-        patch_output = apply_diff_in_sandbox(proposed_fix, repo_path)
+        # Apply the proposed diff (sandbox or local fallback)
+        if sandbox:
+            patch_output = apply_diff_in_sandbox(proposed_fix, repo_path)
+        else:
+            print("[Reviewer] Sandbox container not found. Falling back to local patch application...")
+            patch_output = apply_diff_locally(proposed_fix, repo_path)
+            
         if "Error" in patch_output:
-            if "Sandbox container not found" in patch_output:
-                print("[Reviewer] Sandbox container not found - validation inconclusive.")
-                return {
-                    "errors": "",
-                    "validation_status": "inconclusive",
-                    "history": append_to_history(
-                        "Reviewer",
-                        "Skipped",
-                        "Sandbox container not found. Skipping verification.",
-                    ),
-                }
             print(f"[Reviewer] [FAIL] Patch failed to apply: {patch_output}")
             return {
                 "errors": f"Failed to apply patch:\n{patch_output}",
@@ -285,6 +282,15 @@ def reviewer_node(state: AgentState) -> dict:
         condensed = error_summary
         
         if not success:
+            # Revert local workspace if running locally
+            if not sandbox:
+                print("[Reviewer] Local validation failed. Reverting local changes...")
+                try:
+                    subprocess.run(["git", "checkout", "--", "."], cwd=repo_path, capture_output=True)
+                    subprocess.run(["git", "clean", "-fd"], cwd=repo_path, capture_output=True)
+                except Exception:
+                    pass
+                    
             # Categorize the failures
             error_category = _categorize_error(error_summary)
             error_line_numbers = _extract_line_numbers(error_summary)
@@ -316,6 +322,13 @@ def reviewer_node(state: AgentState) -> dict:
 
     except Exception as exc:
         print(f"[Reviewer] [ERROR] Exception: {exc}")
+        # Clean up local workspace on exception if running locally
+        if not sandbox:
+            try:
+                subprocess.run(["git", "checkout", "--", "."], cwd=repo_path, capture_output=True)
+                subprocess.run(["git", "clean", "-fd"], cwd=repo_path, capture_output=True)
+            except Exception:
+                pass
         return {
             "errors": f"Reviewer validation error: {exc}",
             "validation_status": "failed",
@@ -323,4 +336,83 @@ def reviewer_node(state: AgentState) -> dict:
             "ast_error_detail": "",
             "history": append_to_history("Reviewer", "Error", str(exc)),
         }
+
+
+def apply_diff_locally(diff: str, repo_path: str) -> str:
+    """Applies a code diff (patch) locally to the workspace files."""
+    import os
+    import subprocess
+    from issue_resolver.utils.patch_engine import FuzzyPatchEngine
+    
+    # Prepare/clean the diff
+    diff = diff.replace("\r\n", "\n").strip()
+    diff = diff.replace("sandbox_workspace/", "")
+    if diff.startswith("diff\n"):
+        diff = diff[5:].strip()
+        
+    cleaned_lines = []
+    for line in diff.split("\n"):
+        if line.startswith("---") or line.startswith("+++"):
+            cleaned_lines.append(line)
+        else:
+            m = re.match(r"^([\+\-\s])(?: *)?\d+:(?: *)(.*)$", line)
+            if m:
+                cleaned_lines.append(f"{m.group(1)}{m.group(2)}")
+            else:
+                cleaned_lines.append(line)
+    diff = "\n".join(cleaned_lines)
+    
+    if "---" not in diff or "+++" not in diff:
+        return "Error: The unified diff is missing the `--- a/file` and `+++ b/file` file headers."
+
+    patch_path = os.path.join(repo_path, "fix.patch")
+    try:
+        with open(patch_path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(diff)
+        
+        # Try git apply
+        res = subprocess.run(["git", "apply", "fix.patch"], cwd=repo_path, capture_output=True, text=True)
+        if res.returncode == 0:
+            return "Patch applied successfully locally via git."
+            
+        # Try patch command
+        res = subprocess.run(["patch", "-p1", "<", "fix.patch"], shell=True, cwd=repo_path, capture_output=True, text=True)
+        if res.returncode == 0:
+            return "Patch applied successfully locally via patch."
+    except Exception:
+        pass
+        
+    # Fallback to FuzzyPatchEngine
+    try:
+        pattern = re.compile(
+            r"^<<<<<<< SEARCH\r?\n(.*?)\r?\n=======\r?\n(.*?)\r?\n>>>>>>> REPLACE$",
+            re.MULTILINE | re.DOTALL
+        )
+        blocks = pattern.findall(diff)
+        if not blocks:
+            return "Error: No SEARCH/REPLACE blocks found in proposed diff."
+            
+        patched_file = _extract_patched_file_path(diff)
+        if not patched_file:
+            return "Error: Could not determine file path from diff."
+            
+        file_abs = os.path.abspath(os.path.join(repo_path, patched_file))
+        if not os.path.exists(file_abs):
+            return f"Error: File {patched_file} does not exist."
+            
+        with open(file_abs, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
+            
+        engine = FuzzyPatchEngine(content)
+        for search_text, replace_text in blocks:
+            res_engine = engine.apply_block(search_text, replace_text)
+            if not res_engine["success"]:
+                return f"Error applying block locally: {res_engine.get('hint')}"
+                
+        with open(file_abs, "w", encoding="utf-8", newline="") as f:
+            f.write(engine.file_content)
+            
+        return "Patch applied successfully locally via FuzzyPatchEngine."
+    except Exception as e:
+        return f"Error applying patch locally: {e}"
 

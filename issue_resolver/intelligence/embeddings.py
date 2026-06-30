@@ -21,6 +21,27 @@ from issue_resolver.intelligence.knowledge_graph import RepoKnowledgeGraph
 # Embedding backend abstraction
 # ---------------------------------------------------------------------------
 
+class DirectEmbeddingWrapper:
+    """Wrapper using standard OpenAI SDK client directly to avoid LangChain tokenization conflicts."""
+    def __init__(self, client: Any, model_name: str, input_type: str | None = None):
+        self.client = client
+        self.model_name = model_name
+        self.input_type = input_type
+
+    def embed(self, texts: list[str], input_type: str | None = None) -> list[list[float]]:
+        kwargs = {}
+        actual_input_type = input_type or self.input_type
+        if actual_input_type:
+            kwargs["extra_body"] = {"input_type": actual_input_type}
+
+        response = self.client.embeddings.create(
+            input=texts,
+            model=self.model_name,
+            **kwargs
+        )
+        return [item.embedding for item in response.data]
+
+
 _EMBED_MODEL: Any = None
 _EMBED_DIM: int = 384  # MiniLM default
 
@@ -48,37 +69,29 @@ def _get_embedding_model() -> Any:
             os.environ.get("NVIDIA_API_KEY_PLANNER")
         )
         if api_key:
-            from langchain_openai import OpenAIEmbeddings
+            from openai import OpenAI
             if os.environ.get("OPENAI_API_KEY"):
                 model_name = "text-embedding-3-small"
                 base_url = None
                 dim = 1536
+                client = OpenAI(api_key=api_key)
+                _EMBED_MODEL = DirectEmbeddingWrapper(client, model_name)
             else:
-                model_name = "nvidia/embeddings-nv-embed-qa-4"
+                model_name = "nvidia/llama-nemotron-embed-1b-v2"
                 base_url = os.environ.get("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
-                dim = 1024
+                dim = 2048
+                client = OpenAI(api_key=api_key, base_url=base_url)
+                _EMBED_MODEL = DirectEmbeddingWrapper(client, model_name, "passage")
 
-            class LangChainEmbeddingWrapper:
-                def __init__(self, embeddings: OpenAIEmbeddings):
-                    self.embeddings = embeddings
-                def embed(self, texts: list[str]):
-                    return self.embeddings.embed_documents(texts)
-
-            embedder = OpenAIEmbeddings(
-                model=model_name,
-                api_key=api_key,
-                base_url=base_url,
-            )
-            _EMBED_MODEL = LangChainEmbeddingWrapper(embedder)
             _EMBED_DIM = dim
-            print(f"[Embeddings] Using langchain_openai fallback ({model_name})")
+            print(f"[Embeddings] Using direct openai/nvidia fallback ({model_name})")
             return _EMBED_MODEL
     except Exception as exc:
-        print(f"[Embeddings] Failed to initialize langchain_openai fallback: {exc}")
+        print(f"[Embeddings] Failed to initialize direct openai/nvidia fallback: {exc}")
 
     raise RuntimeError(
         "No real embedding backend is available. BAAI/bge-small-en-v1.5 (via fastembed) "
-        "and OpenAI/Nvidia (via langchain_openai) both failed or lack API keys. "
+        "and OpenAI/Nvidia (via direct openai/nvidia) both failed or lack API keys. "
         "The semantic retrieval pipeline cannot degrade to keyword search."
     )
 
@@ -102,8 +115,12 @@ def embed_text(text: str) -> np.ndarray:
     model = _get_embedding_model()
     if model == "bow_fallback":
         return _bow_embed(text, _EMBED_DIM)
-    # fastembed returns a generator
-    embeddings = list(model.embed([text]))
+    
+    if isinstance(model, DirectEmbeddingWrapper):
+        embeddings = list(model.embed([text], input_type="query"))
+    else:
+        # fastembed returns a generator
+        embeddings = list(model.embed([text]))
     return np.array(embeddings[0], dtype=np.float32)
 
 
@@ -116,7 +133,10 @@ def embed_batch(texts: list[str]) -> np.ndarray:
     if model == "bow_fallback":
         return np.array([_bow_embed(t, _EMBED_DIM) for t in texts], dtype=np.float32)
 
-    embeddings = list(model.embed(texts))
+    if isinstance(model, DirectEmbeddingWrapper):
+        embeddings = list(model.embed(texts, input_type="passage"))
+    else:
+        embeddings = list(model.embed(texts))
     return np.array(embeddings, dtype=np.float32)
 
 

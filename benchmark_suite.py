@@ -20,6 +20,24 @@ from issue_resolver.graph import app
 from issue_resolver.state import AgentState
 
 
+def expected_to_cat(expected_fix_type: str) -> str:
+    """Map expected fix type to issue category format."""
+    mapping = {
+        "bug_fix": "Bug",
+        "typing": "Typing",
+        "configuration": "Configuration",
+        "refactor": "Refactor",
+        "testing": "Testing",
+        "documentation": "Documentation",
+        "performance": "Performance",
+        "security": "Security",
+        "feature": "Feature",
+        "api_change": "API Change",
+        "dependency_update": "Dependency Update",
+    }
+    return mapping.get(expected_fix_type.lower(), "Bug")
+
+
 @dataclass
 class BenchmarkIssue:
     repo_url: str
@@ -51,6 +69,11 @@ class BenchmarkResult:
     total_runtime_ms: float = 0.0
     llm_calls: int = 0
     total_tokens: int = 0
+    
+    # Extended reliability metrics
+    classification_correct: bool = False
+    localization_confidence: float = 0.0
+    patch_applied_successfully: bool = False
 
 
 class BenchmarkSuite:
@@ -123,6 +146,16 @@ class BenchmarkSuite:
         llm_calls = sum(1 for e in trace.events if e.event_type in ("plan_generated", "candidates_generated", "debugging_completed"))
         total_tokens = trace.total_tokens()
 
+        # Calculate extended metrics
+        classified_cat = final_state.get("issue_category", "Bug")
+        expected_cat = expected_to_cat(issue.expected_fix_type)
+        classification_correct = (classified_cat.lower() == expected_cat.lower())
+        
+        loc_confidence = final_state.get("localization_confidence", 0.0)
+        
+        validation_status = final_state.get("validation_status", "")
+        patch_applied_successfully = validation_status in ("applied", "applied_with_errors", "passed")
+
         result = BenchmarkResult(
             issue_id=issue.issue_id,
             difficulty=issue.difficulty,
@@ -138,6 +171,9 @@ class BenchmarkSuite:
             total_runtime_ms=duration_ms,
             llm_calls=llm_calls,
             total_tokens=total_tokens,
+            classification_correct=classification_correct,
+            localization_confidence=loc_confidence,
+            patch_applied_successfully=patch_applied_successfully,
         )
         
         self.results.append(result)
@@ -168,6 +204,8 @@ class BenchmarkSuite:
         solved_count = sum(1 for r in self.results if r.solved)
         pass1_count = sum(1 for r in self.results if r.pass_at_1)
         verif_count = sum(1 for r in self.results if r.verification_success)
+        class_correct_count = sum(1 for r in self.results if r.classification_correct)
+        patch_applied_count = sum(1 for r in self.results if r.patch_applied_successfully)
 
         return {
             "total_issues": n,
@@ -182,6 +220,11 @@ class BenchmarkSuite:
             "avg_runtime_sec": sum(r.total_runtime_ms for r in self.results) / (n * 1000),
             "avg_llm_calls": sum(r.llm_calls for r in self.results) / n,
             "avg_tokens": sum(r.total_tokens for r in self.results) / n,
+            
+            # New metrics
+            "classification_accuracy": class_correct_count / n,
+            "avg_localization_confidence": sum(r.localization_confidence for r in self.results) / n,
+            "patch_application_success_rate": patch_applied_count / n,
         }
 
     def compare(self, baseline: dict[str, Any], current: dict[str, Any]) -> str:
@@ -196,6 +239,9 @@ class BenchmarkSuite:
             ("Solve Rate", "solve_rate", "{:.2%}"),
             ("Pass @ 1 Rate", "pass_at_1", "{:.2%}"),
             ("Verification Success", "verification_success_rate", "{:.2%}"),
+            ("Classification Accuracy", "classification_accuracy", "{:.2%}"),
+            ("Avg Loc Confidence", "avg_localization_confidence", "{:.2%}"),
+            ("Patch Apply Success", "patch_application_success_rate", "{:.2%}"),
             ("Loc Precision", "avg_localization_precision", "{:.2%}"),
             ("Loc Recall", "avg_localization_recall", "{:.2%}"),
             ("Symbols Precision", "avg_symbols_precision", "{:.2%}"),

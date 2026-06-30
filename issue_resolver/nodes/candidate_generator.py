@@ -59,6 +59,50 @@ get_prompt_registry().register("candidate_generator_a", "1.0", _PROMPT_A)
 get_prompt_registry().register("candidate_generator_b", "1.0", _PROMPT_B)
 
 
+import os
+import re
+
+def _parse_blocks(llm_output: str) -> list[tuple[str, str]]:
+    """Parse SEARCH/REPLACE blocks from output."""
+    pattern = re.compile(
+        r"^<<<<<<< SEARCH\r?\n(.*?)\r?\n=======\r?\n(.*?)\r?\n>>>>>>> REPLACE$",
+        re.MULTILINE | re.DOTALL
+    )
+    return pattern.findall(llm_output)
+
+
+def _validate_patch_blocks(patch_text: str, repo_path: str, files_to_edit: list[str]) -> tuple[bool, str]:
+    """Check if all SEARCH blocks in the patch exist in the target files.
+    
+    Returns (is_valid, error_msg).
+    """
+    blocks = _parse_blocks(patch_text)
+    if not blocks:
+        return False, "No SEARCH/REPLACE blocks found in patch."
+    
+    for idx, (search_text, _) in enumerate(blocks):
+        search_text = search_text.replace("\r\n", "\n")
+        found = False
+        for f_rel in files_to_edit:
+            file_abs = os.path.abspath(os.path.join(repo_path, f_rel))
+            if os.path.exists(file_abs):
+                with open(file_abs, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read().replace("\r\n", "\n")
+                if search_text in content:
+                    found = True
+                    break
+                
+                # Check normalized line match
+                norm_search = "\n".join([l.rstrip() for l in search_text.splitlines()])
+                norm_content = "\n".join([l.rstrip() for l in content.splitlines()])
+                if norm_search in norm_content:
+                    found = True
+                    break
+        if not found:
+            return False, f"SEARCH block {idx + 1}:\n{search_text}\nwas not found in any of the target files: {files_to_edit}"
+    return True, ""
+
+
 def _generate_candidate_for_model(
     model_role: str,
     default_model: str,
@@ -94,8 +138,10 @@ def candidate_generator_node(state: AgentState) -> dict:
     """Generate multiple candidate fixes in parallel."""
     print("[CandidateGenerator] Generating patch candidates in parallel (Model Diversity)...")
     issue = state.get("issue", "")
+    repo_path = state.get("repo_path", ".")
     file_context = state.get("file_context", [])
     structured_plan = state.get("structured_plan", {})
+    files_to_edit = structured_plan.get("files_to_edit", [])
 
     context_str = "\n\n".join(file_context[:4]) if file_context else "(no context)"
 
@@ -170,6 +216,61 @@ Generate the SEARCH/REPLACE block.
             })
         except Exception as exc:
             print(f"[CandidateGenerator] Fallback implementation failed: {exc}")
+
+    # Validate generated patches and regenerate once if SEARCH blocks are missing from files
+    validated_results = []
+    for res in results:
+        patch_text = res["patch"]
+        model_name = res["model"]
+        is_valid, err_msg = _validate_patch_blocks(patch_text, repo_path, files_to_edit)
+        
+        if not is_valid and files_to_edit:
+            print(f"[CandidateGenerator] Patch from {model_name} failed SEARCH block validation: {err_msg[:120]}...")
+            print(f"[CandidateGenerator] Asking {model_name} to regenerate patch against latest content...")
+            
+            # Fetch latest file content
+            target_files_content = ""
+            from issue_resolver.tools.repo_tools import read_file
+            for f_rel in files_to_edit:
+                file_abs = os.path.abspath(os.path.join(repo_path, f_rel))
+                if os.path.exists(file_abs):
+                    file_content = read_file.invoke({"file_path": file_abs})
+                    if not file_content.startswith("Error"):
+                        target_files_content += f"=== File: {f_rel} ===\n{file_content}\n\n"
+                        
+            feedback_prompt = f"""\
+The SEARCH block you generated in your previous attempt was not found in the target files.
+Error details:
+{err_msg}
+
+Here is the latest content of the target files for reference:
+{target_files_content}
+
+Please regenerate the SEARCH/REPLACE patch block. Ensure that your SEARCH block matches a contiguous block of code in the target file EXACTLY, character-for-character, including all spacing, indentation, and newlines.
+"""
+            messages_retry = [
+                SystemMessage(content=get_prompt_registry().get("candidate_generator_a" if "gpt" in model_name else "candidate_generator_b")),
+                HumanMessage(content=prompt_content),
+                HumanMessage(content="Previous proposed fix:\n" + patch_text),
+                HumanMessage(content=feedback_prompt),
+            ]
+            
+            try:
+                resp, chosen_model = invoke_with_role_fallback(
+                    role="implementation",
+                    candidates=[model_name],
+                    messages=messages_retry,
+                    temperature=0.2,
+                    max_tokens=4096,
+                )
+                new_patch = getattr(resp, "content", "").strip()
+                res["patch"] = new_patch
+                print(f"[CandidateGenerator] Regenerated patch from {chosen_model} received.")
+            except Exception as e:
+                print(f"[CandidateGenerator] Regeneration call failed for {model_name}: {e}. Keeping original patch.")
+                
+        validated_results.append(res)
+    results = validated_results
 
     # Record trace
     from issue_resolver.core.execution_trace import get_trace

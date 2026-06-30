@@ -1,10 +1,12 @@
-- [x] Update AgentState schema in `issue_resolver/state.py`
-- [x] Implement stateful windowed file viewer tool in `issue_resolver/tools/view_engine.py`
-- [x] Register `file_viewer` tool in `issue_resolver/tools/repo_tools.py` and `issue_resolver/tools/__init__.py`
-- [x] Integrate file_viewer runner and state capturing in `issue_resolver/nodes/researcher.py`
-- [x] Implement container-aware linter gate and auto-reversion check in `issue_resolver/utils/patch_engine.py`
-- [x] Implement AST codebase mapping tool in `issue_resolver/utils/code_mapper.py`
-- [x] Integrate AST mapper generator in `issue_resolver/nodes/setup.py`
+- [x] **1. Issue Classification pre-processing**
+  - [x] Implement `clean_issue_for_classification` in `issue_classifier.py`
+  - [x] Apply cleanup in `issue_classifier_node` prior to scoring & LLM calls
+- [/] **2. Localizer & Retrieval Upgrades**
+  - [ ] Refactor `_extract_entities` to return source categories in `localizer.py`
+  - [ ] Implement prioritized scoring with category multipliers
+  - [ ] Implement confidence boosting based on exact/traceback/backtick hits
+  - [ ] Implement low-confidence expanded pass (extended fuzzy search, traversal, ripgrep fallback)
+  - [ ] Lower thresholds to `0.70` in `localizer.py` and `researcher.py`
 - [x] Update `issue_resolver/nodes/planner.py` to preserve context and symbol map
 - [x] Refactor LangGraph sub-graphs in `issue_resolver/graph.py`
 - [x] Verify that graph compiles and test suites build successfully
