@@ -96,6 +96,11 @@ if st.button("🚀 Start Resolution Process"):
                 issue_content += "\n\nCRITICAL INSTRUCTION: The repository code is located strictly inside the './sandbox_workspace' directory. Do not search the root directory '.'"
             except Exception as e:
                 st.error(f"Error fetching issue: {e}")
+                if "404" in str(e):
+                    st.info("💡 **Troubleshooting Tips:**\n"
+                            "- Ensure your **GitHub Personal Access Token** is correct and has the necessary scopes (`repo` permissions).\n"
+                            "- Ensure the **Repository Path** is in the format `owner/repo` (e.g. `psf/requests`).\n"
+                            "- Verify that the **Issue Number** actually exists in that repository.")
                 st.stop()
 
         # 2. Clone Repository
