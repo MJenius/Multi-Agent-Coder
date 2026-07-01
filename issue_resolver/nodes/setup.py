@@ -5,10 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from issue_resolver.runtime_context import set_environment_config
+from issue_resolver.runtime_context import set_environment_config, reset_runtime_context
 from issue_resolver.state import AgentState
 from issue_resolver.tools.repo_tools import IGNORE_DIRS, _generate_symbol_map_impl
 from issue_resolver.utils.logger import append_to_history
+from issue_resolver.utils.metadata_detector import detect_environment_metadata
 
 
 def _load_root_gitignore_patterns(root: Path) -> list[str]:
@@ -95,43 +96,10 @@ def _detect_nodejs_test_framework(root: Path) -> str:
     return "jest"  # Default to jest
 
 
-def _detect_environment(root: Path) -> tuple[str, dict[str, Any]]:
-    has_sln = any(root.rglob("*.sln"))
-    has_csproj = any(root.rglob("*.csproj"))
-    has_dotnet = has_sln or has_csproj
-    has_node = (root / "package.json").is_file()
-    has_python = (root / "requirements.txt").is_file() or (root / "pyproject.toml").is_file()
-
-    if has_dotnet:
-        return "dotnet", {
-            "test_framework": _detect_dotnet_test_framework(root),
-            "detector_evidence": "sln/csproj detected",
-            "build_command": "dotnet build",
-            "test_command": "dotnet test",
-        }
-    if has_node:
-        return "nodejs", {
-            "test_framework": _detect_nodejs_test_framework(root),
-            "detector_evidence": "package.json detected",
-            "build_command": "npm run build",
-            "test_command": "npm test",
-        }
-    if has_python:
-        return "python", {
-            "test_framework": _detect_python_test_framework(root),
-            "detector_evidence": "requirements/pyproject detected",
-            "build_command": "python -m py_compile",
-            "test_command": "pytest",
-        }
-    return "unknown", {
-        "test_framework": "unknown",
-        "detector_evidence": "no archetype markers",
-        "build_command": "",
-        "test_command": "",
-    }
-
-
 def setup_node(state: AgentState) -> dict:
+    # 1. Reset per-repo runtime context state selectively
+    reset_runtime_context()
+    
     repo_path = state.get("repo_path", "./sandbox_workspace")
     issue_text = state.get("issue", "")
     issue_title = issue_text.splitlines()[0].strip() if issue_text else ""
@@ -170,21 +138,31 @@ def setup_node(state: AgentState) -> dict:
         print("[Setup] Local verification tools are available. Using local verification fallback.")
 
     root = Path(repo_path).resolve()
-    env_type, extra = _detect_environment(root)
+    
+    # 2. Run central metadata detection
+    metadata = detect_environment_metadata(root)
+    env_type = metadata["primary_language"]
+    
     gitignore_patterns = _load_root_gitignore_patterns(root)
-
     merged_ignore = sorted(set(IGNORE_DIRS).union(gitignore_patterns))
+    
     env_config = {
         "repo_root": str(root),
         "environment_type": env_type,
-        "test_framework": extra.get("test_framework", "unknown"),
-        "build_command": extra.get("build_command", ""),
-        "test_command": extra.get("test_command", ""),
-        "detector_evidence": extra.get("detector_evidence", ""),
+        "test_framework": metadata["test_framework"],
+        "build_command": metadata["build_command"],
+        "test_command": metadata["test_command"],
+        "detector_evidence": f"detected from manifest files in {root}",
         "ignore_dirs": sorted(IGNORE_DIRS),
         "gitignore_patterns": gitignore_patterns,
         "merged_ignore_spec": merged_ignore,
         "issue_title": issue_title,
+        # Expanded metadata properties (formatter, linter, type checker, coverage)
+        "formatter": metadata["formatter"],
+        "linter": metadata["linter"],
+        "type_checker": metadata["type_checker"],
+        "ci_system": metadata["ci_system"],
+        "coverage_tool": metadata["coverage_tool"],
     }
 
     set_environment_config(env_config)
@@ -192,9 +170,13 @@ def setup_node(state: AgentState) -> dict:
     from issue_resolver.utils.code_mapper import CodeMapper
     symbol_map = CodeMapper.generate_repo_map(str(root))
     
-    history_msg = f"Detected {env_type} (framework={env_config['test_framework']})"
+    history_msg = f"Detected {env_type} (framework={metadata['framework']}, test_runner={env_config['test_framework']})"
     if len(symbol_map) > 20:  # Non-empty symbol map
         history_msg += f"; symbol map generated ({len(symbol_map.splitlines())} symbols)"
+
+    # Tracing diagnostics
+    print(f"[Setup] Setup completed selectively resetting old state.")
+    print(f"[Setup] Env type: {env_type}, framework: {metadata['framework']}, formatter: {metadata['formatter']}, linter: {metadata['linter']}, type_checker: {metadata['type_checker']}")
 
     return {
         "environment_config": env_config,
@@ -205,3 +187,4 @@ def setup_node(state: AgentState) -> dict:
             history_msg,
         ),
     }
+

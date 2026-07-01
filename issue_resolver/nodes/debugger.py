@@ -145,6 +145,14 @@ def debugger_node(state: AgentState) -> dict:
         if files_to_edit:
             blast_radius = graph.get_affected_modules(files_to_edit)
 
+    # Accept shared localization details (Requirement 2 & 5)
+    localization_info = ""
+    localization_result = state.get("localization_result", {})
+    if localization_result:
+        localization_info = "### Shared Localization Results:\n"
+        for f in localization_result.get("primary_files", [])[:5]:
+            localization_info += f"- `{f['path']}` (Score: {f['score']:.2f}, Confidence: {f['confidence']})\n"
+
     graph_context = ""
     if graph_context_parts:
         graph_context += "### Repository Proximity Context:\n" + "\n".join(graph_context_parts)
@@ -160,8 +168,17 @@ Proposed Patch that Failed:
 Verification Errors:
 {errors}
 
+{localization_info}
 {graph_context}
 """
+
+    # Diagnostics logging (Requirement 6)
+    print(f"[Debugger] Diagnostics: Running root cause diagnosis.")
+    print(f"  - Using traceback and compilation log parsing to isolate error lines.")
+    print(f"  - Supplied {len(parsed_errors)} parsed error locations to LLM.")
+    if localization_result:
+        print(f"  - Aligned diagnostic context with shared localization result (confidence={localization_result.get('confidence', 0.0):.2f})")
+
 
     prompt = get_prompt_registry().get("debugger")
     messages = [
@@ -197,26 +214,28 @@ Verification Errors:
     from issue_resolver.tools.repo_tools import read_file
     
     updated_file_context = list(state.get("file_context", []))
-    files_to_refresh = set()
+    files_to_refresh = {}
     
     # Refresh target files from plan
     structured_plan = state.get("structured_plan", {})
     for f in structured_plan.get("files_to_edit", []):
-        files_to_refresh.add(f.replace("\\", "/").lstrip("./"))
+        files_to_refresh[f.replace("\\", "/").lstrip("./")] = "part of planned edits"
         
     # Refresh files with errors
     for err in parsed_errors:
         if "file" in err:
-            files_to_refresh.add(err["file"].replace("\\", "/").lstrip("./"))
+            files_to_refresh[err["file"].replace("\\", "/").lstrip("./")] = "traceback error location"
             
     # Refresh files with search block mismatches
     mismatched_files = re.findall(r"Block \d+ on (\S+) failed: Search block content not matched", errors)
     for f in mismatched_files:
-        files_to_refresh.add(f.replace("\\", "/").lstrip("./"))
+        files_to_refresh[f.replace("\\", "/").lstrip("./")] = "search block mismatch"
         
-    for rel_path in files_to_refresh:
+    for rel_path, reason in files_to_refresh.items():
         file_abs = os.path.abspath(os.path.join(repo_path, rel_path))
         if os.path.exists(file_abs):
+            # Diagnostic logging (Requirement 6)
+            print(f"[Debugger] Diagnostics: Selecting file `{rel_path}` for context refresh because: {reason}.")
             content = read_file.invoke({"file_path": file_abs})
             if not content.startswith("Error"):
                 snippet_header = f"=== File: {rel_path} ==="

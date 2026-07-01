@@ -19,6 +19,7 @@ from issue_resolver.config import (
     LLM_BACKOFF_MAX_SECONDS,
     LLM_BACKOFF_MULTIPLIER,
     LLM_MAX_ATTEMPTS,
+    LLM_TIMEOUT,
 )
 from issue_resolver.utils.token_bucket import (
     check_rate_limit_before_call,
@@ -236,7 +237,7 @@ def invoke_with_role_fallback(
                 base_url=cfg.base_url or NVIDIA_BASE_URL,
                 temperature=temperature if temperature != 0.0 else cfg.temperature,
                 max_tokens=max_tokens or cfg.max_tokens,
-                timeout=60.0,  # 60s timeout to prevent hanging on gateway timeout
+                timeout=LLM_TIMEOUT,
                 **extra_args
             )
             llm_to_call = llm.bind_tools(tools) if tools else llm

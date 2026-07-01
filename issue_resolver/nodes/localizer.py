@@ -21,6 +21,8 @@ from typing import Any
 from issue_resolver.core.interfaces import Confidence
 from issue_resolver.state import AgentState
 from issue_resolver.utils.logger import append_to_history
+from issue_resolver.utils.issue_utils import clean_issue_text
+from issue_resolver.config import ADAPTIVE_CONFIDENCE_THRESHOLDS
 import issue_resolver.runtime_context as runtime_context
 
 
@@ -105,17 +107,20 @@ class LocalizationResult:
 
 def _extract_entities_with_sources(issue_text: str) -> dict[str, set[str]]:
     """Extract likely code entities from the issue text, categorised by source/signal type."""
+    # Pre-clean raw issue text first
+    cleaned_issue = clean_issue_text(issue_text)
+    
     entity_sources: dict[str, set[str]] = {}
 
     # 1. Backtick-quoted identifiers (highest signal)
-    backtick = re.findall(r"`([^`\n]{2,80})`", issue_text)
+    backtick = re.findall(r"`([^`\n]{2,80})`", cleaned_issue)
     for m in backtick:
         clean = m.split("(")[0].strip()
         if clean and not clean.startswith("http"):
             entity_sources.setdefault(clean, set()).add("backtick")
 
     # 2. Code blocks — extract function/class definitions
-    code_blocks = re.findall(r"```(?:\w+)?\s*\n(.*?)\n```", issue_text, re.DOTALL)
+    code_blocks = re.findall(r"```(?:\w+)?\s*\n(.*?)\n```", cleaned_issue, re.DOTALL)
     for block in code_blocks:
         for val in re.findall(r"(?:def|class)\s+(\w+)", block):
             entity_sources.setdefault(val, set()).add("code_block")
@@ -125,46 +130,46 @@ def _extract_entities_with_sources(issue_text: str) -> dict[str, set[str]]:
     # 3. File paths
     file_paths = re.findall(
         r"([a-zA-Z_]\w*(?:/[a-zA-Z_]\w*)*\.(?:py|js|ts|go|rs|java|cpp|c|h|jsx|tsx|vue|rb))",
-        issue_text,
+        cleaned_issue,
     )
     for path in file_paths:
         entity_sources.setdefault(path, set()).add("file_path")
 
     # 4. PascalCase class names (e.g. TableTitle, HttpClient)
-    pascal = re.findall(r"\b([A-Z][a-z]+(?:[A-Z][a-z]+)+)\b", issue_text)
+    pascal = re.findall(r"\b([A-Z][a-z]+(?:[A-Z][a-z]+)+)\b", cleaned_issue)
     for val in pascal:
         entity_sources.setdefault(val, set()).add("pascal")
 
     # 5. snake_case identifiers
-    snake = re.findall(r"\b([a-z][a-z0-9]*_[a-z0-9_]+)\b", issue_text)
+    snake = re.findall(r"\b([a-z][a-z0-9]*_[a-z0-9_]+)\b", cleaned_issue)
     for val in snake:
         entity_sources.setdefault(val, set()).add("snake")
 
     # 6. camelCase identifiers
-    camel = re.findall(r"\b([a-z]+[A-Z][a-zA-Z0-9]*)\b", issue_text)
+    camel = re.findall(r"\b([a-z]+[A-Z][a-zA-Z0-9]*)\b", cleaned_issue)
     for val in camel:
         entity_sources.setdefault(val, set()).add("camel")
 
     # 7. Dotted names (module.Class.method)
     dotted = re.findall(
         r"\b([a-zA-Z_]\w+\.[a-zA-Z_]\w+(?:\.[a-zA-Z_]\w+)*)\b",
-        issue_text,
+        cleaned_issue,
     )
     for val in dotted:
         entity_sources.setdefault(val, set()).add("dotted")
 
     # 8. Error class names
-    errors = re.findall(r"\b([A-Z][a-z]+(?:Error|Exception|Warning|Fault))\b", issue_text)
+    errors = re.findall(r"\b([A-Z][a-z]+(?:Error|Exception|Warning|Fault))\b", cleaned_issue)
     for val in errors:
         entity_sources.setdefault(val, set()).add("error_class")
 
     # 9. Traceback file references: File "foo/bar.py", line 42
-    trace_files = re.findall(r'File "([^"]+)"', issue_text)
+    trace_files = re.findall(r'File "([^"]+)"', cleaned_issue)
     for path in trace_files:
         entity_sources.setdefault(path, set()).add("traceback_file")
 
     # 10. Traceback function names: in calculate_total
-    trace_funcs = re.findall(r"^\s+in (\w+)\s*$", issue_text, re.MULTILINE)
+    trace_funcs = re.findall(r"^\s+in (\w+)\s*$", cleaned_issue, re.MULTILINE)
     for func in trace_funcs:
         entity_sources.setdefault(func, set()).add("traceback_func")
 
@@ -309,7 +314,15 @@ def _run_localization_pass(
             if normalised in (graph.modules or {}):
                 found = True
                 file_scores[normalised] = file_scores.get(normalised, 0.0) + (0.8 * mult)
-                file_reasons.setdefault(normalised, []).append("mentioned as file path")
+                file_reasons.setdefault(normalised, []).append(f"mentioned as file path: {entity}")
+            else:
+                # Suffix/fuzzy file path matching (Requirement 3)
+                for mod in (graph.modules or {}):
+                    if mod.endswith(normalised) or normalised.endswith(mod):
+                        found = True
+                        file_scores[mod] = file_scores.get(mod, 0.0) + (0.8 * mult)
+                        file_reasons.setdefault(mod, []).append(f"mentioned as file path (suffix match: {entity})")
+                        break
 
         # Fuzzy symbol search as last resort
         if not found:
@@ -399,6 +412,22 @@ def _run_localization_pass(
     return file_scores, file_reasons, symbols, all_references, test_files, dependency_neighbors, graph_hits, graph_misses, missed_entities
 
 
+def determine_issue_type(issue_text: str) -> str:
+    """Heuristically determine the category/type of the issue."""
+    text_lower = issue_text.lower()
+    # 1. Stack trace / tracebacks
+    if "traceback" in text_lower or "stack trace" in text_lower or "reproduce" in text_lower or 'file "' in text_lower:
+        return "stack_trace"
+    # 2. Typing issues
+    if "typeerror" in text_lower or "mypy" in text_lower or "pyright" in text_lower or "type annotation" in text_lower:
+        return "typing_issue"
+    # 3. Feature requests / enhancements
+    if "feature" in text_lower or "support" in text_lower or "request" in text_lower or "add a new" in text_lower or "enhance" in text_lower:
+        return "feature_request"
+    # Default to runtime bug
+    return "runtime_bug"
+
+
 def _localize(issue_text: str) -> LocalizationResult:
     """Run the full deterministic localization pipeline."""
     graph = runtime_context.get_knowledge_graph()
@@ -437,27 +466,47 @@ def _localize(issue_text: str) -> LocalizationResult:
     hit_rate = graph_hits / total_entities
     
     def compute_overall_confidence(hit_rate_val, symbols_list, file_scores_dict):
-        exact_hit_count = sum(1 for s in symbols_list if s.confidence >= 0.9)
-        traceback_hit_count = sum(1 for s in symbols_list if s.source in ("graph", "graph_fuzzy") and any("traceback" in src for src in entity_sources.get(s.name, [])))
-        backtick_hit_count = sum(1 for s in symbols_list if any("backtick" in src for src in entity_sources.get(s.name, [])))
-        file_path_hit_count = sum(1 for fp in file_scores_dict if any(fp.endswith(ent) or ent in fp for ent in entities if "file_path" in entity_sources.get(ent, [])))
+        has_traceback = any(any("traceback" in src for src in entity_sources.get(ent, [])) for ent in entities)
+        has_backtick = any(any("backtick" in src for src in entity_sources.get(ent, [])) for ent in entities)
+        has_file_path = any(any("file_path" in src for src in entity_sources.get(ent, [])) for ent in entities)
+        
+        exact_graph_matches = sum(1 for s in symbols_list if s.source == "graph")
+        has_class_or_func = any(s.kind in ("class", "function", "method") for s in symbols_list)
         
         base_confidence = hit_rate_val * 0.4
-        if exact_hit_count > 0:
+        
+        # Heavily increase confidence for high-signal matches (Requirement 3)
+        if has_traceback:
+            base_confidence += 0.4
+        if has_file_path:
+            base_confidence += 0.35
+        if has_backtick:
             base_confidence += 0.25
-        if traceback_hit_count > 0:
+        if exact_graph_matches > 0:
             base_confidence += 0.25
-        if backtick_hit_count > 0:
-            base_confidence += 0.15
-        if file_path_hit_count > 0:
-            base_confidence += 0.15
-        return min(1.0, max(0.0, base_confidence))
+        if has_class_or_func:
+            base_confidence += 0.2
+            
+        if (has_file_path or has_traceback or (has_backtick and exact_graph_matches > 0)):
+            overall = min(1.0, max(0.85, base_confidence))
+            # Diagnostic tracing logs (Requirement 6)
+            print(f"[Localizer] Diagnostics: Assigned high confidence={overall:.2f} due to explicit traceback/file/backtick matching.")
+            return overall
+            
+        overall = min(1.0, max(0.0, base_confidence))
+        print(f"[Localizer] Diagnostics: Assigned normal confidence={overall:.2f} based on hit rate {hit_rate_val:.2f}.")
+        return overall
 
     overall_confidence = compute_overall_confidence(hit_rate, symbols, file_scores)
 
-    # Adaptive expansion pass if confidence below 0.70
-    if overall_confidence < 0.70:
-        print(f"[Localizer] Confidence {overall_confidence:.2f} < 0.70. Running expanded pass with graph traversal expansion and fallback localization...")
+    # Heuristic issue classification to select adaptive threshold (Requirement 2)
+    issue_type = determine_issue_type(issue_text)
+    threshold = ADAPTIVE_CONFIDENCE_THRESHOLDS.get(issue_type, ADAPTIVE_CONFIDENCE_THRESHOLDS["default"])
+    print(f"[Localizer] Diagnostics: Detected issue type '{issue_type}', using adaptive threshold={threshold:.2f} (current confidence={overall_confidence:.2f})")
+
+    # Adaptive expansion pass if confidence below threshold
+    if overall_confidence < threshold:
+        print(f"[Localizer] Confidence {overall_confidence:.2f} < {threshold:.2f}. Running expanded pass with graph traversal expansion and fallback localization...")
         file_scores, file_reasons, symbols, all_references, test_files, dependency_neighbors, graph_hits, graph_misses, missed_entities = \
             _run_localization_pass(entities, entity_sources, graph, lsp_bridge, lsp_available, repo_path, expand=True)
             
@@ -483,22 +532,27 @@ def _localize(issue_text: str) -> LocalizationResult:
         for p, s in file_scores.items()
     }
 
-    from issue_resolver.core.interfaces import Confidence
+    from issue_resolver.core.interfaces import Confidence as InterfaceConfidence
     primary_files = [
         ScoredFile(
             path=path,
             score=score,
-            confidence=Confidence.from_score(score),
+            confidence=InterfaceConfidence.from_score(score),
             reasons=file_reasons.get(path, []),
         )
         for path, score in sorted(normalised_scores.items(), key=lambda x: x[1], reverse=True)
     ]
 
-    # Needs fallback if overall confidence below 0.70
+    # Needs fallback if overall confidence below threshold
     needs_fallback = (
-        overall_confidence < 0.70
+        overall_confidence < threshold
         or len(primary_files) == 0
     )
+
+    # Trace log file selections (Requirement 6)
+    print(f"[Localizer] Diagnostics: Selected {len(primary_files)} primary files based on graph and LSP lookup:")
+    for pf in primary_files[:5]:
+        print(f"  - `{pf.path}` (score={pf.score:.2f}, confidence={pf.confidence.value}) because: {', '.join(pf.reasons)}")
 
     return LocalizationResult(
         primary_files=primary_files,

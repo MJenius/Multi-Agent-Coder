@@ -79,3 +79,93 @@ def test_context_budget_manager():
     assert len(processed) == 3
     b_snip = [s for s in processed if "b.py" in s][0]
     assert "[...truncated]" in b_snip
+
+
+def test_clean_issue_text():
+    from issue_resolver.utils.issue_utils import clean_issue_text
+    raw = """
+    Title: Fix type crash
+    <!-- HTML Comment -->
+    - [ ] Checklist item 1
+    - [x] Checklist item 2
+    Please check the following before submitting.
+    Follow the [instructions](http://example.com/instruct.py) and read [docs](http://github.com/user/docs).
+    Let's see: `calculate_total` in `calculate.py` crashes.
+    """
+    cleaned = clean_issue_text(raw)
+    assert "HTML Comment" not in cleaned
+    assert "Checklist item 1" not in cleaned
+    assert "Checklist item 2" not in cleaned
+    assert "Please check" not in cleaned
+    assert "instruct.py" not in cleaned
+    assert "http://" not in cleaned
+    assert "calculate_total" in cleaned
+    assert "calculate.py" in cleaned
+
+
+def test_selective_reset_runtime_context():
+    import issue_resolver.runtime_context as rc
+    # Mock plugins and router
+    rc._MODEL_ROUTER = "router_instance"
+    rc._PLUGIN_REGISTRY = "plugin_registry_instance"
+    rc._KNOWLEDGE_GRAPH = "knowledge_graph_instance"
+    rc._ENVIRONMENT_CONFIG = {"repo_root": "/path"}
+    
+    rc.reset_runtime_context()
+    
+    assert rc.get_model_router() == "router_instance"
+    assert rc.get_plugin_registry() == "plugin_registry_instance"
+    assert rc.get_knowledge_graph() is None
+    assert rc.get_environment_config() == {}
+
+
+def test_detect_environment_metadata(tmp_path):
+    # Create mock python manifest files
+    (tmp_path / "pyproject.toml").write_text("""
+    [project]
+    dependencies = ["django", "fastapi"]
+    
+    [tool.pytest]
+    test_option = true
+    """, encoding="utf-8")
+    (tmp_path / "uv.lock").write_text("""
+    [[package]]
+    name = "django"
+    version = "5.0"
+    """, encoding="utf-8")
+    
+    from issue_resolver.utils.metadata_detector import detect_environment_metadata
+    metadata = detect_environment_metadata(tmp_path)
+    
+    assert metadata["primary_language"] == "python"
+    assert metadata["framework"] == "Django"
+    assert metadata["test_framework"] == "pytest"
+    assert metadata["package_manager"] == "uv"
+
+
+def test_compute_localization_quality_metrics():
+    from issue_resolver.core.metrics import compute_localization_quality_metrics
+    state = {
+        "localization_result": {
+            "primary_files": [
+                {"path": "src/main.py", "score": 1.0, "confidence": "high"},
+                {"path": "src/utils.py", "score": 0.8, "confidence": "medium"}
+            ],
+            "graph_hits": 8,
+            "graph_misses": 2,
+        },
+        "localization_confidence": 0.90,
+        "structured_plan": {
+            "files_to_edit": ["src/main.py"]
+        }
+    }
+    
+    metrics = compute_localization_quality_metrics(state, is_resolved=True)
+    quality = metrics["localization_quality"]
+    
+    assert quality["precision"] == 0.5  # 1 matched / 2 retrieved
+    assert quality["recall"] == 1.0     # 1 matched / 1 expected
+    assert quality["all_edited_in_initial"] is True
+    assert quality["graph_hit_rate"] == 0.8
+    assert abs(quality["confidence_calibration_error"] - 0.10) < 1e-6
+

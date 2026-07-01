@@ -142,13 +142,27 @@ class RepoAnalyzer:
 
     def analyse(self) -> RepoProfile:
         """Run all analysis stages."""
-        self._detect_languages()
-        self._detect_framework()
-        self._detect_tooling()
-        self._detect_testing()
-        self._detect_ci()
+        from issue_resolver.utils.metadata_detector import detect_environment_metadata
+        metadata = detect_environment_metadata(self.root)
+        
+        self.profile.primary_language = metadata["primary_language"]
+        self.profile.framework = metadata["framework"]
+        self.profile.architecture_pattern = metadata["architecture_pattern"]
+        self.profile.test_framework = metadata["test_framework"]
+        self.profile.test_command = metadata["test_command"]
+        self.profile.test_directory = metadata["test_directory"]
+        self.profile.build_command = metadata["build_command"]
+        self.profile.dev_command = metadata["dev_command"]
+        self.profile.package_manager = metadata["package_manager"]
+        self.profile.formatter = metadata["formatter"]
+        self.profile.linter = metadata["linter"]
+        self.profile.type_checker = metadata["type_checker"]
+        self.profile.ci_system = metadata["ci_system"]
+        self.profile.metadata["coverage_tool"] = metadata["coverage_tool"]
+        
+        # Run remaining stages that rely on repository knowledge graph context
+        self._detect_languages() # to also get secondary languages
         self._detect_conventions()
-        self._detect_commands()
         self._compute_complexity()
         return self.profile
 

@@ -54,6 +54,8 @@ Critical Rules:
 5. If the issue is about parsing, serialization, or type formatting, prioritize modifications to general utilities/encoders over specific wrappers or endpoints.
 6. Keep the scope of edits minimal and precise. Avoid massive repository-wide code edits.
 7. Drive your decisions (e.g. files to edit, affected modules, execution order, dependency mapping) primarily using the Repository Intelligence section. The Repository Graph structure and relationship links are the authoritative source of repository structure. Align your step dependencies with the import/dependency relationships shown in the graph.
+8. Restrict proposed edits ("files_to_edit") strictly to the files identified in the Localization Results. Do not propose editing files that have not been localized.
+9. For each step in the implementation plan, explicitly specify the reason why that file was selected for modification.
 """
 
 get_prompt_registry().register("planner", "2.0", _SYSTEM_PROMPT)
@@ -225,6 +227,13 @@ Generate a structured plan in JSON format.
             "files_to_edit": [],
             "implementation_steps": [],
         }
+
+    # Diagnostics logging (Requirement 6)
+    print("[Planner] Diagnostics: Plan targets and choices:")
+    for f in plan_dict.get("files_to_edit", []):
+        print(f"  - Selected file to edit: `{f}`")
+    print(f"  - Selected verification/test strategy: {plan_dict.get('test_strategy', 'none')}")
+    print(f"  - Assigned plan confidence: {plan_dict.get('confidence_score', 0.0)}")
 
     # Log plan execution trace
     from issue_resolver.core.execution_trace import get_trace

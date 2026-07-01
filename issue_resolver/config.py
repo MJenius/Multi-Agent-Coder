@@ -123,6 +123,7 @@ LLM_MAX_ATTEMPTS: int = int(os.environ.get("LLM_MAX_ATTEMPTS", "4"))
 LLM_BACKOFF_INITIAL_SECONDS: float = float(os.environ.get("LLM_BACKOFF_INITIAL_SECONDS", "1.0"))
 LLM_BACKOFF_MULTIPLIER: float = float(os.environ.get("LLM_BACKOFF_MULTIPLIER", "2.0"))
 LLM_BACKOFF_MAX_SECONDS: float = float(os.environ.get("LLM_BACKOFF_MAX_SECONDS", "30.0"))
+LLM_TIMEOUT: float = float(os.environ.get("LLM_TIMEOUT", "180.0"))
 
 NVIDIA_RPM_LIMIT: int = int(os.environ.get("NVIDIA_RPM_LIMIT", "60"))
 NVIDIA_TPM_LIMIT: int = int(os.environ.get("NVIDIA_TPM_LIMIT", "100000"))
@@ -139,3 +140,13 @@ SANDBOX_WORKSPACE_DIR: str = os.environ.get(
 POSTGRES_USER: str = os.environ.get("POSTGRES_USER", "user")
 POSTGRES_PASSWORD: str = os.environ.get("POSTGRES_PASSWORD", "password")
 POSTGRES_DB: str = os.environ.get("POSTGRES_DB", "langgraph_state")
+
+# Adaptive Localization Confidence Settings
+ADAPTIVE_CONFIDENCE_THRESHOLDS: dict[str, float] = {
+    "stack_trace": float(os.environ.get("THRESHOLD_STACK_TRACE", "0.85")),
+    "runtime_bug": float(os.environ.get("THRESHOLD_RUNTIME_BUG", "0.80")),
+    "typing_issue": float(os.environ.get("THRESHOLD_TYPING_ISSUE", "0.75")),
+    "feature_request": float(os.environ.get("THRESHOLD_FEATURE_REQUEST", "0.70")),
+    "default": float(os.environ.get("THRESHOLD_DEFAULT", "0.80")),
+}
+

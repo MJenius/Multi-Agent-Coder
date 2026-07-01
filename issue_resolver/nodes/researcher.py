@@ -378,27 +378,47 @@ def researcher_node(state: AgentState) -> dict:
     localization = state.get("localization_result", {})
     localization_confidence = state.get("localization_confidence", 0.0)
 
-    # Skip entirely if Localizer is confident
-    if localization_confidence >= 0.7:
-        print(f"[Researcher] Localizer confidence={localization_confidence:.2f} >= 0.7, skipping fallback.")
+    from issue_resolver.config import ADAPTIVE_CONFIDENCE_THRESHOLDS
+    from issue_resolver.nodes.localizer import determine_issue_type
+    issue_type = determine_issue_type(state.get("issue", ""))
+    threshold = ADAPTIVE_CONFIDENCE_THRESHOLDS.get(issue_type, ADAPTIVE_CONFIDENCE_THRESHOLDS["default"])
+
+    # Skip entirely if Localizer is confident (Requirement 2)
+    if localization_confidence >= threshold:
+        print(f"[Researcher] Localizer confidence={localization_confidence:.2f} >= threshold={threshold:.2f}, skipping fallback.")
         return {
             "history": append_to_history(
                 "Researcher",
                 "Skipped",
-                f"Localizer confidence {localization_confidence:.2f} >= 0.7, researcher not needed.",
+                f"Localizer confidence {localization_confidence:.2f} >= threshold {threshold:.2f}, researcher not needed.",
             ),
         }
 
-    print(f"[Researcher] Running as FALLBACK (Localizer confidence={localization_confidence:.2f})...")
+    print(f"[Researcher] Running as FALLBACK (Localizer confidence={localization_confidence:.2f} < threshold={threshold:.2f})...")
     state_updates = {}
 
     repo_path = state.get("repo_path", ".")
     issue_text = state.get("issue", "(no issue provided)")
     errors = state.get("errors", "")
 
-    # Focus on what the Localizer missed
+    # Consuming shared localization output instead of independent discovery (Requirement 2 & 5)
+    primary_files_dict = {f["path"]: f for f in localization.get("primary_files", [])}
+    
+    # 1. Target files already identified by the Localizer
+    target_files = list(primary_files_dict.keys())
+    
+    # 2. Target symbols identified by the Localizer
+    localizer_symbols = localization.get("symbols", [])
+    symbol_files = [s["file_path"] for s in localizer_symbols if s.get("file_path")]
+    for sf in symbol_files:
+        if sf not in target_files:
+            target_files.append(sf)
+            
+    # Missed entities from the localizer
     missed_entities = localization.get("missed_entities", [])
-    already_found_files = [f["path"] for f in localization.get("primary_files", [])]
+    
+    # Diagnostic logging (Requirement 6)
+    print(f"[Researcher] Diagnostics: Consuming shared localization results. Target files: {target_files[:5]}, Missed entities: {missed_entities[:10]}")
 
     human_str = f"GitHub Issue:\n{issue_text}\n\nRepository path: {repo_path}\n\n"
 
@@ -407,7 +427,7 @@ def researcher_node(state: AgentState) -> dict:
         for ent in missed_entities[:10]:
             human_str += f"  - {ent}\n"
         human_str += "\nFocus your search on THESE entities. "
-        human_str += f"The Localizer already found: {', '.join(already_found_files[:5])}\n\n"
+        human_str += f"The Localizer already found: {', '.join(target_files[:5])}\n\n"
 
     if errors:
         human_str += f"Supervisor Feedback/Errors:\n{errors}\n\n"
@@ -448,33 +468,9 @@ def researcher_node(state: AgentState) -> dict:
         except Exception as e:
             print(f"[Researcher] Could not read CONTRIBUTING.md: {e}")
 
-    hint_files = _extract_hints_from_issue(issue_text)
-    if hint_files:
-        print(f"[Researcher] Found {len(hint_files)} direct hint(s): {hint_files}")
-        history_additions.extend(append_to_history("Researcher", "Hint Extraction", f"Hints: {hint_files}"))
-
-    # 1. Query the Repository Graph before doing keyword search
-    graph = runtime_context.get_knowledge_graph()
-    graph_files = []
-    if graph:
-        graph_files = _query_graph_for_symbols(issue_text, graph)
-        if graph_files:
-            print(f"[Researcher] Found {len(graph_files)} files matching symbols in Repository Graph: {graph_files}")
-            history_additions.extend(
-                append_to_history("Researcher", "Graph Symbol Lookup", f"Matched files from Repository Graph: {graph_files}")
-            )
-
-    # Merge hint files and graph-resolved symbol files
-    all_target_files = []
-    for f in hint_files:
-        if f not in all_target_files:
-            all_target_files.append(f)
-    for f in graph_files:
-        if f not in all_target_files:
-            all_target_files.append(f)
-
-    if all_target_files:
-        for idx, target_file in enumerate(all_target_files[:_MAX_FILES_READ], 1):
+    # Directly use target_files from shared localization rather than hints/graph discovery
+    if target_files:
+        for idx, target_file in enumerate(target_files[:_MAX_FILES_READ], 1):
             if files_read >= _MAX_FILES_READ:
                 break
 
@@ -509,6 +505,15 @@ def researcher_node(state: AgentState) -> dict:
                     history_additions.extend(
                         append_to_history("Researcher", "Target Read", f"{normalized_target} ({lines_in_file} lines)")
                     )
+                    
+                    # Update localizer score/reasons
+                    if normalized_target not in primary_files_dict:
+                        primary_files_dict[normalized_target] = {
+                            "path": normalized_target,
+                            "score": 0.85,
+                            "confidence": "medium",
+                            "reasons": ["read by researcher fallback target"]
+                        }
             except Exception as e:
                 print(f"[Researcher] Exception reading {target_file}: {e}")
                 history_additions.extend(
@@ -517,17 +522,26 @@ def researcher_node(state: AgentState) -> dict:
 
     if snippets and files_read >= 1:
         print(
-            f"[Researcher] Hints provided {files_read} file(s), {total_lines} lines. "
+            f"[Researcher] Localizer primary targets provided {files_read} file(s), {total_lines} lines. "
             f"Skipping LLM search."
         )
         history_additions.extend(
             append_to_history(
                 "Researcher",
                 "Targeting Complete",
-                f"Collected {len(snippets)} snippets (from hints). Read {files_read} files.",
+                f"Collected {len(snippets)} snippets (from targets). Read {files_read} files.",
             )
         )
         snippets = _manage_context_budget(snippets)
+        
+        # Save updated localization_result (Requirement 5)
+        localization["primary_files"] = list(primary_files_dict.values())
+        localization["primary_files"].sort(key=lambda x: x["score"], reverse=True)
+        state_updates["localization_confidence"] = max(localization_confidence, 0.8)
+        localization["confidence"] = state_updates["localization_confidence"]
+        localization["needs_researcher_fallback"] = False
+        state_updates["localization_result"] = localization
+        
         return_dict: dict = {
             "file_context": snippets,
             "history": history_additions,
@@ -535,14 +549,17 @@ def researcher_node(state: AgentState) -> dict:
         }
         if contribution_guidelines:
             return_dict["contribution_guidelines"] = contribution_guidelines
+            
+        print(f"[Researcher] Diagnostics: Localization confidence updated to {state_updates['localization_confidence']:.2f}")
         return return_dict
 
     if not snippets:
-        keywords = _extract_keywords_from_issue(issue_text)
+        # Focus keywords search on missed_entities from shared localization rather than extracting keywords from raw issue (Requirement 2)
+        keywords = missed_entities
         if keywords:
-            print(f"[Researcher] Auto-search keywords from issue: {keywords[:3]}")
+            print(f"[Researcher] Auto-search keywords from missed entities: {keywords[:3]}")
             history_additions.extend(
-                append_to_history("Researcher", "Auto-Search", f"Keywords: {keywords[:3]}")
+                append_to_history("Researcher", "Auto-Search", f"Missed entities: {keywords[:3]}")
             )
 
             for keyword in keywords[:2]:
@@ -860,6 +877,33 @@ def researcher_node(state: AgentState) -> dict:
     )
 
     snippets = _manage_context_budget(snippets)
+    
+    # Extract all file paths from snippets to update the single source of truth (Requirement 2 & 5)
+    for snippet in snippets:
+        m = re.match(r"^# --- (?:\[HINTED\] )?file: (.+?) ---", snippet)
+        if m:
+            path = m.group(1).replace("\\", "/").lstrip("./")
+            if path not in primary_files_dict:
+                primary_files_dict[path] = {
+                    "path": path,
+                    "score": 0.85,
+                    "confidence": "medium",
+                    "reasons": ["discovered during researcher exploration"]
+                }
+                
+    localization["primary_files"] = list(primary_files_dict.values())
+    localization["primary_files"].sort(key=lambda x: x["score"], reverse=True)
+    
+    if files_read > 0 or len(snippets) > 0:
+        state_updates["localization_confidence"] = max(localization_confidence, 0.80)
+        localization["confidence"] = state_updates["localization_confidence"]
+        localization["needs_researcher_fallback"] = False
+        
+    state_updates["localization_result"] = localization
+    
+    # Tracing diagnostics (Requirement 6)
+    print(f"[Researcher] Diagnostics: Updating shared localization results. Conf: {localization.get('confidence'):.2f}, Primary files count: {len(localization['primary_files'])}")
+
     return_dict: dict = {
         "file_context": snippets,
         "history": history_additions,

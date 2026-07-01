@@ -145,3 +145,63 @@ def find_stack_trace(issue_text: str) -> str | None:
             return '\n'.join(lines)
     
     return None
+
+
+def clean_issue_text(issue_text: str) -> str:
+    """Strip HTML, markdown links/syntax, checklist items, raw URLs, and boilerplate."""
+    if not issue_text:
+        return ""
+
+    # Remove HTML comments
+    text = re.sub(r"<!--.*?-->", "", issue_text, flags=re.DOTALL)
+
+    # Remove Markdown checkboxes (e.g. - [x], - [ ], * [X], etc.)
+    text = re.sub(r"^\s*[-*+]\s*\[[ xX]\]\s*.*$", "", text, flags=re.MULTILINE)
+
+    # Convert markdown links [label](url) to just label, removing the URL.
+    text = re.sub(r"\[([^\]]+)\]\((https?://\S+|www\.\S+|[^)]+)\)", r"\1", text)
+
+    # Strip raw http/https/ftp URLs and www links completely
+    text = re.sub(r"https?://\S+|www\.\S+", "", text)
+
+    # Strip HTML tags
+    text = re.sub(r"<[^>]+>", "", text)
+
+    # Filter out boilerplate / issue templates lines and headers
+    cleaned_lines = []
+    boilerplate_keywords = [
+        "checklist",
+        "check list",
+        "please check",
+        "i have checked",
+        "i have searched",
+        "tick the boxes",
+        "before submitting",
+        "contribution guidelines",
+        "read the docs",
+        "read the documentation",
+        "describe the bug",
+        "clear and concise description",
+        "reproduction steps are helpful",
+        "please fill out the details below",
+        "any other context you would like to provide",
+        "desktop (please complete the following information)",
+        "additional context",
+    ]
+    
+    for line in text.splitlines():
+        line_stripped = line.strip()
+        if not line_stripped:
+            cleaned_lines.append(line)
+            continue
+            
+        lower_line = line_stripped.lower()
+        
+        # Check if line matches boilerplate keyword
+        if any(keyword in lower_line for keyword in boilerplate_keywords):
+            continue
+            
+        cleaned_lines.append(line)
+
+    return "\n".join(cleaned_lines)
+

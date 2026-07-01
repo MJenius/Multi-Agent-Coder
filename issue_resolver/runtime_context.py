@@ -115,3 +115,16 @@ def get_repo_intelligence() -> dict[str, Any]:
         "profile": _REPO_PROFILE,
         "lsp": _LSP_BRIDGE,
     }
+
+
+def reset_runtime_context() -> None:
+    """Selectively reset per-repository state, preserving reusable assets like model routers and plugin registries."""
+    global _ENVIRONMENT_CONFIG, _KNOWLEDGE_GRAPH, _EMBEDDING_INDEX, _HYBRID_RETRIEVER, _REPO_PROFILE, _LSP_BRIDGE, _EXECUTION_INTELLIGENCE
+    _ENVIRONMENT_CONFIG = {}
+    _KNOWLEDGE_GRAPH = None
+    _EMBEDDING_INDEX = None
+    _HYBRID_RETRIEVER = None
+    _REPO_PROFILE = None
+    _LSP_BRIDGE = None
+    _EXECUTION_INTELLIGENCE = {}
+

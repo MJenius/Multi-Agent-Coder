@@ -300,6 +300,12 @@ def patch_engineering_node(state: AgentState) -> dict:
     }
     res = pe_graph.invoke(sub_state)
     completion_entry = append_to_history("PatchEngineering", "Complete", f"Patch engineering complete. Status: {res.get('validation_status')}.")[0]
+    
+    is_resolved = (res.get("validation_status") == "passed")
+    merged_state = {**state, **res}
+    from issue_resolver.core.metrics import compute_localization_quality_metrics
+    metrics = compute_localization_quality_metrics(merged_state, is_resolved)
+
     return {
         "proposed_fix": res.get("proposed_fix"),
         "validation_status": res.get("validation_status"),
@@ -308,7 +314,8 @@ def patch_engineering_node(state: AgentState) -> dict:
         "ast_error_detail": res.get("ast_error_detail"),
         "coder_retry_budget": res.get("coder_retry_budget"),
         "iterations": res.get("iterations"),
-        "is_resolved": res.get("validation_status") == "passed",
+        "is_resolved": is_resolved,
+        "metrics": metrics,
         "history": res.get("history", []) + [completion_entry],
     }
 

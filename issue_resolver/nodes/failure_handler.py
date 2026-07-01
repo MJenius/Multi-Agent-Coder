@@ -58,12 +58,16 @@ def failure_handler_node(state: AgentState) -> dict:
 
     print(f"[FailureHandler] Failure summary:\n{failure_summary}")
 
+    from issue_resolver.core.metrics import compute_localization_quality_metrics
+    metrics = compute_localization_quality_metrics(state, is_resolved=False)
+
     return {
         "is_resolved": False,
         "next_step": "end",
         "failure_summary": failure_summary,
         "execution_intelligence": strategy_info,
         "adaptive_strategy": strategy_info.get("strategy", ""),
+        "metrics": metrics,
         "history": append_to_history(
             "FailureHandler",
             "Budget Exhausted",
